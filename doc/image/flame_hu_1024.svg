@@ -1,0 +1,2665 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="582" onload="init(evt)" viewBox="0 0 1200 582" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="582.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="565" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="565" > </text>
+<g id="frames">
+<g >
+<title>handler::ha_index_read_map:1041(1041) (2,186,483,804 samples, 1.03%)</title><rect x="1125.6" y="309" width="12.1" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1128.56" y="319.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:108,avg:804925 (86,931,868 samples, 0.04%)</title><rect x="1188.3" y="325" width="0.4" height="15.0" fill="rgb(211,30,7)" rx="2" ry="2" />
+<text  x="1191.26" y="335.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1054(13),avg:592030 (623,161,142 samples, 0.29%)</title><rect x="1137.8" y="277" width="3.4" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="1140.77" y="287.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:999,avg:76285 (76,208,957 samples, 0.04%)</title><rect x="1169.0" y="373" width="0.4" height="15.0" fill="rgb(237,149,35)" rx="2" ry="2" />
+<text  x="1172.02" y="383.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:167,avg:176206 (29,426,381 samples, 0.01%)</title><rect x="1189.0" y="293" width="0.1" height="15.0" fill="rgb(217,59,14)" rx="2" ry="2" />
+<text  x="1191.97" y="303.5" ></text>
+</g>
+<g >
+<title>row_upd_clust_rec:1597,avg:13897 (22,194,257 samples, 0.01%)</title><rect x="1123.0" y="277" width="0.1" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1125.98" y="287.5" ></text>
+</g>
+<g >
+<title>row_search_index_entry:2296,avg:272567 (625,812,732 samples, 0.29%)</title><rect x="1185.5" y="421" width="3.4" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="1188.45" y="431.5" ></text>
+</g>
+<g >
+<title>RecLock::create:2525,avg:20176 (50,943,152 samples, 0.02%)</title><rect x="1116.6" y="149" width="0.2" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="1119.56" y="159.5" ></text>
+</g>
+<g >
+<title>vio_socket_io_wait:2661(4),avg:37515 (99,679,833 samples, 0.05%)</title><rect x="22.3" y="373" width="0.5" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="25.26" y="383.5" ></text>
+</g>
+<g >
+<title>net_flush:2659,avg:11957 (31,792,918 samples, 0.01%)</title><rect x="22.9" y="405" width="0.2" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="25.90" y="415.5" ></text>
+</g>
+<g >
+<title>pwrite64@plt:882(1),avg:541265 (476,854,644 samples, 0.22%)</title><rect x="1155.2" y="373" width="2.7" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="1158.20" y="383.5" ></text>
+</g>
+<g >
+<title>__evlist__enable:48(48) (502,214,284 samples, 0.24%)</title><rect x="16.7" y="501" width="2.8" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="19.66" y="511.5" ></text>
+</g>
+<g >
+<title>ut_delay:3773,avg:7333 (27,666,947 samples, 0.01%)</title><rect x="1188.7" y="341" width="0.2" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="1191.74" y="351.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:28,avg:846831 (23,711,266 samples, 0.01%)</title><rect x="1141.7" y="165" width="0.1" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1144.68" y="175.5" ></text>
+</g>
+<g >
+<title>row_purge_remove_sec_if_poss_tree:213,avg:879665 (187,368,745 samples, 0.09%)</title><rect x="1188.9" y="437" width="1.1" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="1191.93" y="447.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:345,avg:184443 (63,632,762 samples, 0.03%)</title><rect x="1168.1" y="261" width="0.4" height="15.0" fill="rgb(232,125,30)" rx="2" ry="2" />
+<text  x="1171.12" y="271.5" ></text>
+</g>
+<g >
+<title>row_upd_step:1(1) (197,215,214 samples, 0.09%)</title><rect x="1161.2" y="501" width="1.1" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="1164.25" y="511.5" ></text>
+</g>
+<g >
+<title>sel_set_rec_lock:4142(9),avg:234094 (972,841,482 samples, 0.46%)</title><rect x="1112.2" y="213" width="5.4" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="1115.16" y="223.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:2(1) (195,863,450 samples, 0.09%)</title><rect x="1161.3" y="373" width="1.0" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="1164.25" y="383.5" ></text>
+</g>
+<g >
+<title>IndexRangeScanIterator::Read:4256(1052),avg:60493770 (196,837,829,338 samples, 92.72%)</title><rect x="23.5" y="373" width="1094.1" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="26.54" y="383.5" >IndexRangeScanIterator::Read:4256(1052),avg:60493770</text>
+</g>
+<g >
+<title>Sql_cmd_update::update_single_table:1056(1056) (3,104,869,639 samples, 1.46%)</title><rect x="1125.5" y="405" width="17.3" height="15.0" fill="rgb(208,16,3)" rx="2" ry="2" />
+<text  x="1128.54" y="415.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:21(11),avg:471798 (648,817,016 samples, 0.31%)</title><rect x="1164.1" y="453" width="3.6" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1167.11" y="463.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:7985,avg:4456 (35,579,446 samples, 0.02%)</title><rect x="1123.7" y="213" width="0.2" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1126.66" y="223.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:36,avg:674777 (24,291,971 samples, 0.01%)</title><rect x="1142.6" y="181" width="0.1" height="15.0" fill="rgb(221,75,17)" rx="2" ry="2" />
+<text  x="1145.58" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@plt:475(1),avg:1051962 (498,629,979 samples, 0.23%)</title><rect x="1147.0" y="437" width="2.8" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="1150.05" y="447.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:428,avg:55532 (23,767,801 samples, 0.01%)</title><rect x="1136.6" y="165" width="0.1" height="15.0" fill="rgb(240,165,39)" rx="2" ry="2" />
+<text  x="1139.59" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:50,avg:636483 (31,824,148 samples, 0.01%)</title><rect x="1125.1" y="133" width="0.1" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="1128.06" y="143.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:35,avg:745770 (26,101,950 samples, 0.01%)</title><rect x="1189.8" y="357" width="0.1" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="1192.77" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown]:48(47) (502,114,408 samples, 0.24%)</title><rect x="16.7" y="421" width="2.8" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="19.66" y="431.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:9(6),avg:330657 (167,298,138 samples, 0.08%)</title><rect x="1160.3" y="405" width="0.9" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1163.30" y="415.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:427,avg:54087 (23,095,339 samples, 0.01%)</title><rect x="1136.6" y="117" width="0.1" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1139.59" y="127.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:1924(7),avg:175811 (337,031,091 samples, 0.16%)</title><rect x="1117.8" y="181" width="1.9" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1120.79" y="191.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:333,avg:486730 (162,081,124 samples, 0.08%)</title><rect x="1168.1" y="357" width="0.9" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="1171.10" y="367.5" ></text>
+</g>
+<g >
+<title>net_write_packet:2659,avg:11953 (31,783,463 samples, 0.01%)</title><rect x="22.9" y="389" width="0.2" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="25.90" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown]:2525(1022),avg:128852077 (193,664,672,225 samples, 91.22%)</title><rect x="31.4" y="117" width="1076.4" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="34.42" y="127.5" >[unknown]:2525(1022),avg:128852077</text>
+</g>
+<g >
+<title>__libc_pwrite64:882(1),avg:541264 (476,853,179 samples, 0.22%)</title><rect x="1155.2" y="357" width="2.7" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="1158.20" y="367.5" ></text>
+</g>
+<g >
+<title>ha_innobase::multi_range_read_next:4256(1052),avg:60493504 (196,836,890,591 samples, 92.71%)</title><rect x="23.5" y="325" width="1094.1" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="26.54" y="335.5" >ha_innobase::multi_range_read_next:4256(1052),avg:60493504</text>
+</g>
+<g >
+<title>lock_update_delete:2088,avg:21264 (44,398,425 samples, 0.02%)</title><rect x="1179.1" y="405" width="0.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="1182.14" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown]:52,avg:557082 (28,968,244 samples, 0.01%)</title><rect x="1123.4" y="101" width="0.2" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="1126.43" y="111.5" ></text>
+</g>
+<g >
+<title>btr_pcur_restore_position_func:1501(6),avg:511361 (774,195,567 samples, 0.36%)</title><rect x="1107.9" y="197" width="4.3" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="1110.85" y="207.5" ></text>
+</g>
+<g >
+<title>IndexRangeScanIterator::Read:2097(1041),avg:623 (2,188,242,110 samples, 1.03%)</title><rect x="1125.5" y="389" width="12.2" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="1128.55" y="399.5" ></text>
+</g>
+<g >
+<title>os_event::wait_time_low:5(1),avg:100054124 (400,216,918 samples, 0.19%)</title><rect x="1157.9" y="469" width="2.2" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="1160.88" y="479.5" ></text>
+</g>
+<g >
+<title>ut_delay:71710,avg:7153 (512,969,467 samples, 0.24%)</title><rect x="1112.6" y="149" width="2.8" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="1115.59" y="159.5" ></text>
+</g>
+<g >
+<title>vio_write:2659,avg:11564 (30,749,006 samples, 0.01%)</title><rect x="22.9" y="357" width="0.2" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="25.90" y="367.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:1206(2),avg:55772 (67,150,068 samples, 0.03%)</title><rect x="1112.2" y="101" width="0.4" height="15.0" fill="rgb(242,172,41)" rx="2" ry="2" />
+<text  x="1115.21" y="111.5" ></text>
+</g>
+<g >
+<title>ha_commit_trans:2663(14),avg:259623 (691,020,497 samples, 0.33%)</title><rect x="1142.9" y="405" width="3.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1145.92" y="415.5" ></text>
+</g>
+<g >
+<title>TC_LOG_DUMMY::commit:2663(14),avg:255796 (680,855,227 samples, 0.32%)</title><rect x="1143.0" y="389" width="3.8" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="1145.97" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown]:2(1) (191,882,896 samples, 0.09%)</title><rect x="15.3" y="405" width="1.0" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="18.26" y="415.5" ></text>
+</g>
+<g >
+<title>row_search_index_entry:333,avg:231781 (77,183,008 samples, 0.04%)</title><rect x="1169.0" y="405" width="0.4" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="1172.02" y="415.5" ></text>
+</g>
+<g >
+<title>row_search_mvcc:19(19) (180,030,915 samples, 0.08%)</title><rect x="1160.2" y="501" width="1.0" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="1163.25" y="511.5" ></text>
+</g>
+<g >
+<title>row_purge_remove_sec_if_poss_leaf:2302(7),avg:766398 (1,762,994,589 samples, 0.83%)</title><rect x="1179.1" y="437" width="9.8" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1182.13" y="447.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:7977(12),avg:151655 (1,375,415,628 samples, 0.65%)</title><rect x="23.6" y="181" width="7.6" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="26.59" y="191.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:268,avg:507665 (136,054,142 samples, 0.06%)</title><rect x="1123.9" y="197" width="0.8" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="1126.92" y="207.5" ></text>
+</g>
+<g >
+<title>row_search_on_row_ref:333,avg:486751 (162,088,071 samples, 0.08%)</title><rect x="1168.1" y="373" width="0.9" height="15.0" fill="rgb(232,125,30)" rx="2" ry="2" />
+<text  x="1171.10" y="383.5" ></text>
+</g>
+<g >
+<title>evlist_cpu_iterator__next:96(48),avg:255 (502,157,653 samples, 0.24%)</title><rect x="16.7" y="485" width="2.8" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="19.66" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:35,avg:744659 (26,063,072 samples, 0.01%)</title><rect x="1189.8" y="309" width="0.1" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="1192.77" y="319.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:39,avg:664978 (25,934,156 samples, 0.01%)</title><rect x="1123.7" y="149" width="0.1" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="1126.66" y="159.5" ></text>
+</g>
+<g >
+<title>handler::read_range_first:2659(1052),avg:120610021 (196,835,903,305 samples, 92.71%)</title><rect x="23.5" y="277" width="1094.1" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="26.55" y="287.5" >handler::read_range_first:2659(1052),avg:120610021</text>
+</g>
+<g >
+<title>handler::multi_range_read_next:4256(1052),avg:60493477 (196,836,787,266 samples, 92.71%)</title><rect x="23.5" y="293" width="1094.1" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="26.55" y="303.5" >handler::multi_range_read_next:4256(1052),avg:60493477</text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:2286(1),avg:183382 (419,028,455 samples, 0.20%)</title><rect x="1179.5" y="245" width="2.4" height="15.0" fill="rgb(247,193,46)" rx="2" ry="2" />
+<text  x="1182.52" y="255.5" ></text>
+</g>
+<g >
+<title>row_purge_poss_sec:2302(7),avg:471278 (1,085,137,092 samples, 0.51%)</title><rect x="1179.4" y="421" width="6.1" height="15.0" fill="rgb(205,3,0)" rx="2" ry="2" />
+<text  x="1182.42" y="431.5" ></text>
+</g>
+<g >
+<title>fil_redo_io:883(2),avg:542122 (477,610,349 samples, 0.22%)</title><rect x="1155.2" y="469" width="2.7" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="1158.20" y="479.5" ></text>
+</g>
+<g >
+<title>DeadlockChecker::check_and_resolve:2525,avg:25196 (63,619,062 samples, 0.03%)</title><rect x="1116.8" y="133" width="0.4" height="15.0" fill="rgb(243,179,42)" rx="2" ry="2" />
+<text  x="1119.84" y="143.5" ></text>
+</g>
+<g >
+<title>[unknown]:589,avg:589954 (347,482,834 samples, 0.16%)</title><rect x="1185.5" y="261" width="1.9" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="1188.49" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:587,avg:592286 (347,671,658 samples, 0.16%)</title><rect x="1185.5" y="293" width="1.9" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1188.49" y="303.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:355(6),avg:4379569 (1,528,470,005 samples, 0.72%)</title><rect x="1170.6" y="469" width="8.4" height="15.0" fill="rgb(220,73,17)" rx="2" ry="2" />
+<text  x="1173.55" y="479.5" ></text>
+</g>
+<g >
+<title>ut_delay:5971,avg:7241 (43,234,034 samples, 0.02%)</title><rect x="1142.3" y="213" width="0.3" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="1145.33" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:75,avg:615111 (46,133,344 samples, 0.02%)</title><rect x="1169.0" y="277" width="0.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1172.02" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___waitpid:1 (36,193,209 samples, 0.02%)</title><rect x="16.5" y="469" width="0.2" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="19.46" y="479.5" ></text>
+</g>
+<g >
+<title>.plt:1 (32,240,047 samples, 0.02%)</title><rect x="22.0" y="373" width="0.2" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="24.99" y="383.5" ></text>
+</g>
+<g >
+<title>os_file_write_page:882(1),avg:541662 (477,204,283 samples, 0.22%)</title><rect x="1155.2" y="421" width="2.7" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="1158.20" y="431.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::acquire:1052(9),avg:188717 (198,303,430 samples, 0.09%)</title><rect x="1136.6" y="213" width="1.1" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1139.58" y="223.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1054(13),avg:588330 (619,284,345 samples, 0.29%)</title><rect x="1137.8" y="245" width="3.4" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="1140.78" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:1267,avg:172541 (218,609,597 samples, 0.10%)</title><rect x="1137.8" y="165" width="1.2" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="1140.82" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:2459(10),avg:249479 (610,974,164 samples, 0.29%)</title><rect x="23.7" y="69" width="3.3" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="26.65" y="79.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:1392(4),avg:548581 (765,049,137 samples, 0.36%)</title><rect x="1107.9" y="133" width="4.2" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1110.87" y="143.5" ></text>
+</g>
+<g >
+<title>row_search_index_entry:1(1) (196,261,525 samples, 0.09%)</title><rect x="1161.3" y="469" width="1.0" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="1164.25" y="479.5" ></text>
+</g>
+<g >
+<title>ha_innobase::index_read:2659(1052),avg:120609204 (196,834,339,207 samples, 92.71%)</title><rect x="23.6" y="245" width="1094.0" height="15.0" fill="rgb(211,30,7)" rx="2" ry="2" />
+<text  x="26.56" y="255.5" >ha_innobase::index_read:2659(1052),avg:120609204</text>
+</g>
+<g >
+<title>trx_commit_low:6(6) (19,436,566 samples, 0.01%)</title><rect x="1160.1" y="357" width="0.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="1163.14" y="367.5" ></text>
+</g>
+<g >
+<title>ut_delay:43695,avg:7132 (311,648,125 samples, 0.15%)</title><rect x="1134.8" y="165" width="1.7" height="15.0" fill="rgb(253,222,53)" rx="2" ry="2" />
+<text  x="1137.81" y="175.5" ></text>
+</g>
+<g >
+<title>row_purge_reposition_pcur:2302(7),avg:463494 (1,067,228,516 samples, 0.50%)</title><rect x="1179.4" y="405" width="6.0" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="1182.43" y="415.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:5270,avg:6393 (33,690,755 samples, 0.02%)</title><rect x="1142.6" y="245" width="0.2" height="15.0" fill="rgb(210,25,6)" rx="2" ry="2" />
+<text  x="1145.57" y="255.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:268,avg:507352 (135,970,418 samples, 0.06%)</title><rect x="1123.9" y="165" width="0.8" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="1126.92" y="175.5" ></text>
+</g>
+<g >
+<title>btr_pcur_restore_position_func:1608(11),avg:589460 (950,584,353 samples, 0.45%)</title><rect x="1117.7" y="277" width="5.3" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="1120.70" y="287.5" ></text>
+</g>
+<g >
+<title>parse_and_execute:2(2) (33,019,051 samples, 0.02%)</title><rect x="22.0" y="485" width="0.2" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="24.99" y="495.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::acquire:13(8),avg:141044 (169,512,121 samples, 0.08%)</title><rect x="1160.3" y="437" width="0.9" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1163.30" y="447.5" ></text>
+</g>
+<g >
+<title>net_send_ok:2659,avg:12835 (34,129,262 samples, 0.02%)</title><rect x="22.9" y="421" width="0.2" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="25.89" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown]:11,avg:132499477 (1,457,494,249 samples, 0.69%)</title><rect x="1125.6" y="165" width="8.1" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="1128.61" y="175.5" ></text>
+</g>
+<g >
+<title>log_files_write_buffer:883(2),avg:547666 (482,498,742 samples, 0.23%)</title><rect x="1155.2" y="485" width="2.7" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="1158.20" y="495.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:47,avg:713031 (33,512,464 samples, 0.02%)</title><rect x="1142.6" y="229" width="0.2" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1145.57" y="239.5" ></text>
+</g>
+<g >
+<title>row_purge_poss_sec:333,avg:494608 (164,704,319 samples, 0.08%)</title><rect x="1168.1" y="405" width="0.9" height="15.0" fill="rgb(218,62,14)" rx="2" ry="2" />
+<text  x="1171.10" y="415.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1(1) (196,258,141 samples, 0.09%)</title><rect x="1161.3" y="421" width="1.0" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="1164.25" y="431.5" ></text>
+</g>
+<g >
+<title>_dl_runtime_resolve_xsavec:1 (32,240,032 samples, 0.02%)</title><rect x="22.0" y="357" width="0.2" height="15.0" fill="rgb(226,100,23)" rx="2" ry="2" />
+<text  x="24.99" y="367.5" ></text>
+</g>
+<g >
+<title>row_update_for_mysql:1056(15),avg:859232 (905,471,737 samples, 0.43%)</title><rect x="1137.7" y="357" width="5.1" height="15.0" fill="rgb(242,171,41)" rx="2" ry="2" />
+<text  x="1140.75" y="367.5" ></text>
+</g>
+<g >
+<title>mysql_execute_command:6(6) (24,791,589 samples, 0.01%)</title><rect x="1160.1" y="501" width="0.1" height="15.0" fill="rgb(209,18,4)" rx="2" ry="2" />
+<text  x="1163.11" y="511.5" ></text>
+</g>
+<g >
+<title>row_upd_sec_index_entry:1056(2),avg:246565 (260,105,162 samples, 0.12%)</title><rect x="1141.3" y="309" width="1.5" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1144.33" y="319.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:2659(12),avg:459398 (1,383,544,353 samples, 0.65%)</title><rect x="23.6" y="197" width="7.7" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="26.58" y="207.5" ></text>
+</g>
+<g >
+<title>nanosleep@plt:51(1),avg:1052719 (52,636,009 samples, 0.02%)</title><rect x="1167.7" y="469" width="0.3" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="1170.75" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown]:5(1),avg:100054720 (400,218,881 samples, 0.19%)</title><rect x="12.9" y="437" width="2.2" height="15.0" fill="rgb(226,101,24)" rx="2" ry="2" />
+<text  x="15.92" y="447.5" ></text>
+</g>
+<g >
+<title>lock_wait_suspend_thread:1028(1000),avg:52056480 (1,460,941,468 samples, 0.69%)</title><rect x="1125.6" y="245" width="8.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="1128.60" y="255.5" ></text>
+</g>
+<g >
+<title>lock_clust_rec_read_check_and_lock:14(10),avg:278300 (170,446,892 samples, 0.08%)</title><rect x="1160.3" y="469" width="0.9" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="1163.30" y="479.5" ></text>
+</g>
+<g >
+<title>lock_update_age:2525,avg:20066 (50,665,790 samples, 0.02%)</title><rect x="1117.2" y="149" width="0.3" height="15.0" fill="rgb(233,129,31)" rx="2" ry="2" />
+<text  x="1120.20" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown]:36,avg:672774 (24,219,876 samples, 0.01%)</title><rect x="1142.6" y="133" width="0.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="1145.58" y="143.5" ></text>
+</g>
+<g >
+<title>trans_commit_stmt:6(6) (19,463,412 samples, 0.01%)</title><rect x="1160.1" y="485" width="0.1" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1163.14" y="495.5" ></text>
+</g>
+<g >
+<title>row_update_for_mysql:1608(11),avg:858260 (1,379,878,011 samples, 0.65%)</title><rect x="1117.7" y="341" width="7.6" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1120.68" y="351.5" ></text>
+</g>
+<g >
+<title>sel_restore_position_for_mysql:1501(6),avg:511378 (774,219,775 samples, 0.36%)</title><rect x="1107.9" y="213" width="4.3" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="1110.85" y="223.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:28,avg:846831 (23,711,266 samples, 0.01%)</title><rect x="1141.7" y="181" width="0.1" height="15.0" fill="rgb(252,217,51)" rx="2" ry="2" />
+<text  x="1144.68" y="191.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1056,avg:30114 (31,800,879 samples, 0.01%)</title><rect x="1141.5" y="213" width="0.2" height="15.0" fill="rgb(208,16,3)" rx="2" ry="2" />
+<text  x="1144.50" y="223.5" ></text>
+</g>
+<g >
+<title>dispatch_command:3725(2132),avg:121427129 (202,263,010,396 samples, 95.27%)</title><rect x="22.8" y="469" width="1124.2" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="25.82" y="479.5" >dispatch_command:3725(2132),avg:121427129</text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:2525(1022),avg:128852698 (193,665,721,586 samples, 91.22%)</title><rect x="31.4" y="133" width="1076.4" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="34.42" y="143.5" >pthread_cond_wait@@GLIBC_2.3.2:2525(1022),avg:128852698</text>
+</g>
+<g >
+<title>__GI___waitpid:1 (32,204,641 samples, 0.02%)</title><rect x="22.0" y="341" width="0.2" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="24.99" y="351.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::LockSysGuard:704(1),avg:139840 (98,561,623 samples, 0.05%)</title><rect x="1115.5" y="165" width="0.5" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="1118.47" y="175.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:153,avg:519112 (79,424,143 samples, 0.04%)</title><rect x="1141.9" y="181" width="0.4" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="1144.89" y="191.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::LockSysGuard:13(8),avg:141171 (169,513,814 samples, 0.08%)</title><rect x="1160.3" y="453" width="0.9" height="15.0" fill="rgb(242,171,40)" rx="2" ry="2" />
+<text  x="1163.30" y="463.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:1206(2),avg:55772 (67,150,068 samples, 0.03%)</title><rect x="1112.2" y="117" width="0.4" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1115.21" y="127.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:2(2) (191,885,419 samples, 0.09%)</title><rect x="15.3" y="453" width="1.0" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="18.26" y="463.5" ></text>
+</g>
+<g >
+<title>net_write_raw_loop:2659,avg:11872 (31,567,197 samples, 0.01%)</title><rect x="22.9" y="373" width="0.2" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="25.90" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown]:268,avg:505927 (135,588,336 samples, 0.06%)</title><rect x="1123.9" y="117" width="0.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1126.92" y="127.5" ></text>
+</g>
+<g >
+<title>trx_commit:2663(14),avg:254029 (676,155,153 samples, 0.32%)</title><rect x="1143.0" y="309" width="3.8" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="1145.99" y="319.5" ></text>
+</g>
+<g >
+<title>do_command:3727(2136),avg:121325367 (202,382,050,913 samples, 95.33%)</title><rect x="22.2" y="485" width="1124.8" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="25.17" y="495.5" >do_command:3727(2136),avg:121325367</text>
+</g>
+<g >
+<title>os_event::wait_time_low:479(2),avg:1076711 (513,591,087 samples, 0.24%)</title><rect x="10.0" y="469" width="2.9" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" ></text>
+</g>
+<g >
+<title>ut_delay:6512,avg:7149 (46,556,825 samples, 0.02%)</title><rect x="1189.1" y="309" width="0.3" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1192.13" y="319.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::LockSysGuard:1597,avg:16511 (26,368,026 samples, 0.01%)</title><rect x="1123.1" y="245" width="0.2" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="1126.13" y="255.5" ></text>
+</g>
+<g >
+<title>innobase_commit:2663(14),avg:255499 (680,063,689 samples, 0.32%)</title><rect x="1143.0" y="357" width="3.8" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="1145.98" y="367.5" ></text>
+</g>
+<g >
+<title>CTS::CsnWaitMgr::csn_wait_monitor:1(1) (513,699,191 samples, 0.24%)</title><rect x="10.0" y="501" width="2.9" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>trx_commit:6(6) (19,437,766 samples, 0.01%)</title><rect x="1160.1" y="373" width="0.1" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="1163.14" y="383.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:54,avg:624462 (33,720,922 samples, 0.02%)</title><rect x="1189.5" y="309" width="0.2" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="1192.50" y="319.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:719(5),avg:51878 (37,044,978 samples, 0.02%)</title><rect x="1143.1" y="229" width="0.2" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="1146.08" y="239.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:12(9),avg:1058474 (314,434,272 samples, 0.15%)</title><rect x="1162.3" y="453" width="1.8" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1165.35" y="463.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1056,avg:30117 (31,803,165 samples, 0.01%)</title><rect x="1141.5" y="229" width="0.2" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="1144.50" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown]:720(3),avg:49742 (35,665,200 samples, 0.02%)</title><rect x="1143.1" y="149" width="0.2" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="1146.08" y="159.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:1267,avg:172539 (218,606,878 samples, 0.10%)</title><rect x="1137.8" y="149" width="1.2" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="1140.82" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown]:352,avg:177676 (62,542,109 samples, 0.03%)</title><rect x="1168.1" y="213" width="0.4" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1171.12" y="223.5" ></text>
+</g>
+<g >
+<title>ppoll@plt:2659(2),avg:37340 (99,214,293 samples, 0.05%)</title><rect x="22.3" y="341" width="0.5" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="25.27" y="351.5" ></text>
+</g>
+<g >
+<title>lock_rec_grant:2659,avg:66733 (177,441,993 samples, 0.08%)</title><rect x="1145.3" y="245" width="1.0" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="1148.35" y="255.5" ></text>
+</g>
+<g >
+<title>TTASEventMutex&lt;GenericPolicy&gt;::wait:1265(7),avg:53263 (68,783,331 samples, 0.03%)</title><rect x="1112.2" y="149" width="0.4" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="1115.20" y="159.5" ></text>
+</g>
+<g >
+<title>row_search_mvcc:2659(1052),avg:120607977 (196,831,528,301 samples, 92.71%)</title><rect x="23.6" y="229" width="1094.0" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="26.57" y="239.5" >row_search_mvcc:2659(1052),avg:120607977</text>
+</g>
+<g >
+<title>lock_rec_lock:4133,avg:63682 (263,197,255 samples, 0.12%)</title><rect x="1116.1" y="181" width="1.5" height="15.0" fill="rgb(205,3,0)" rx="2" ry="2" />
+<text  x="1119.10" y="191.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:15954(12),avg:75555 (1,371,980,735 samples, 0.65%)</title><rect x="23.6" y="165" width="7.6" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="26.60" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:355(6),avg:4378736 (1,528,179,161 samples, 0.72%)</title><rect x="1170.6" y="437" width="8.4" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="1173.55" y="447.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:268,avg:507352 (135,970,418 samples, 0.06%)</title><rect x="1123.9" y="181" width="0.8" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="1126.92" y="191.5" ></text>
+</g>
+<g >
+<title>row_upd_clust_step:1608(11),avg:605862 (976,779,505 samples, 0.46%)</title><rect x="1117.7" y="293" width="5.4" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="1120.70" y="303.5" ></text>
+</g>
+<g >
+<title>btr_cur_del_mark_set_sec_rec:1597,avg:17195 (27,460,989 samples, 0.01%)</title><rect x="1123.1" y="277" width="0.2" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="1126.13" y="287.5" ></text>
+</g>
+<g >
+<title>open_tables:2659,avg:8271 (21,993,737 samples, 0.01%)</title><rect x="23.4" y="373" width="0.1" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="26.40" y="383.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:37,avg:589891 (21,825,968 samples, 0.01%)</title><rect x="1141.5" y="165" width="0.1" height="15.0" fill="rgb(251,216,51)" rx="2" ry="2" />
+<text  x="1144.51" y="175.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1054(8),avg:588501 (619,239,770 samples, 0.29%)</title><rect x="1137.8" y="229" width="3.4" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="1140.78" y="239.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:167,avg:176480 (29,472,130 samples, 0.01%)</title><rect x="1189.0" y="309" width="0.1" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="1191.97" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown]:54,avg:624136 (33,703,369 samples, 0.02%)</title><rect x="1189.5" y="277" width="0.2" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="1192.50" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown]:2,avg:97930698 (195,861,395 samples, 0.09%)</title><rect x="1161.3" y="309" width="1.0" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="1164.25" y="319.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:333,avg:198933 (66,244,602 samples, 0.03%)</title><rect x="1169.0" y="341" width="0.4" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="1172.02" y="351.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::acquire:6(6) (19,363,211 samples, 0.01%)</title><rect x="1160.1" y="325" width="0.1" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="1163.14" y="335.5" ></text>
+</g>
+<g >
+<title>os_event::timed_wait:3688(1),avg:135861 (500,919,122 samples, 0.24%)</title><rect x="1152.3" y="453" width="2.8" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="1155.31" y="463.5" ></text>
+</g>
+<g >
+<title>waitpid@plt:4,avg:8101257 (32,405,029 samples, 0.02%)</title><rect x="22.0" y="389" width="0.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="24.99" y="399.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:2296,avg:218038 (500,615,434 samples, 0.24%)</title><rect x="1185.5" y="373" width="2.8" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="1188.47" y="383.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:145,avg:794414 (115,190,089 samples, 0.05%)</title><rect x="1188.3" y="357" width="0.6" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="1191.26" y="367.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@@GLIBC_2.3.2:3688(1),avg:135851 (500,882,166 samples, 0.24%)</title><rect x="1152.3" y="421" width="2.8" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="1155.31" y="431.5" ></text>
+</g>
+<g >
+<title>os_event_wait_time_low:6(1),avg:89201055 (446,005,864 samples, 0.21%)</title><rect x="1149.8" y="485" width="2.5" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="1152.82" y="495.5" ></text>
+</g>
+<g >
+<title>trx_commit_low:2663(14),avg:253819 (675,596,818 samples, 0.32%)</title><rect x="1143.0" y="293" width="3.8" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="1146.00" y="303.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1597,avg:26464 (42,263,233 samples, 0.02%)</title><rect x="1123.4" y="197" width="0.3" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1126.43" y="207.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:11,avg:132500008 (1,457,500,092 samples, 0.69%)</title><rect x="1125.6" y="197" width="8.1" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="1128.61" y="207.5" ></text>
+</g>
+<g >
+<title>net_read_raw_loop:5320(4),avg:21215 (112,788,333 samples, 0.05%)</title><rect x="22.2" y="405" width="0.6" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="25.19" y="415.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1(1) (196,261,525 samples, 0.09%)</title><rect x="1161.3" y="453" width="1.0" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="1164.25" y="463.5" ></text>
+</g>
+<g >
+<title>os_event::wait_time_low:6(1),avg:89201055 (446,005,864 samples, 0.21%)</title><rect x="1149.8" y="469" width="2.5" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="1152.82" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown]:2(2) (32,941,861 samples, 0.02%)</title><rect x="22.0" y="453" width="0.2" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="24.99" y="463.5" ></text>
+</g>
+<g >
+<title>lock_wait_suspend_thread:2525(1025),avg:129110271 (193,675,509,483 samples, 91.23%)</title><rect x="31.4" y="197" width="1076.4" height="15.0" fill="rgb(217,58,14)" rx="2" ry="2" />
+<text  x="34.38" y="207.5" >lock_wait_suspend_thread:2525(1025),avg:129110271</text>
+</g>
+<g >
+<title>log_write_notifier:1(1) (504,201,524 samples, 0.24%)</title><rect x="1152.3" y="501" width="2.8" height="15.0" fill="rgb(208,16,3)" rx="2" ry="2" />
+<text  x="1155.30" y="511.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:427,avg:54091 (23,096,659 samples, 0.01%)</title><rect x="1136.6" y="133" width="0.1" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1139.59" y="143.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:816,avg:94375 (77,009,607 samples, 0.04%)</title><rect x="1189.0" y="341" width="0.4" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="1191.96" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown]:39,avg:663055 (25,859,142 samples, 0.01%)</title><rect x="1123.7" y="101" width="0.1" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="1126.66" y="111.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:54,avg:625885 (33,797,791 samples, 0.02%)</title><rect x="1189.5" y="357" width="0.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1192.50" y="367.5" ></text>
+</g>
+<g >
+<title>net_read_packet:2661(4),avg:43143 (114,646,460 samples, 0.05%)</title><rect x="22.2" y="421" width="0.6" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="25.18" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown]:28,avg:844901 (23,657,233 samples, 0.01%)</title><rect x="1141.7" y="117" width="0.1" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1144.68" y="127.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:39,avg:664978 (25,934,156 samples, 0.01%)</title><rect x="1123.7" y="165" width="0.1" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="1126.66" y="175.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:1689(1),avg:624988 (1,057,074,133 samples, 0.50%)</title><rect x="1179.5" y="325" width="5.8" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="1182.45" y="335.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:2460(14),avg:184954 (616,728,029 samples, 0.29%)</title><rect x="23.7" y="133" width="3.4" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="26.65" y="143.5" ></text>
+</g>
+<g >
+<title>wait_for:1 (32,431,359 samples, 0.02%)</title><rect x="22.0" y="421" width="0.2" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="24.99" y="431.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:9(3),avg:1056636 (167,296,060 samples, 0.08%)</title><rect x="1160.3" y="389" width="0.9" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="1163.30" y="399.5" ></text>
+</g>
+<g >
+<title>lock_clust_rec_read_check_and_lock:1052(10),avg:193303 (203,184,214 samples, 0.10%)</title><rect x="1136.6" y="245" width="1.1" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="1139.58" y="255.5" ></text>
+</g>
+<g >
+<title>Protocol_classic::get_command:2661(4),avg:43442 (115,441,694 samples, 0.05%)</title><rect x="22.2" y="469" width="0.6" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="25.18" y="479.5" ></text>
+</g>
+<g >
+<title>ut_delay:82730,avg:7158 (592,187,857 samples, 0.28%)</title><rect x="1119.7" y="197" width="3.3" height="15.0" fill="rgb(246,193,46)" rx="2" ry="2" />
+<text  x="1122.66" y="207.5" ></text>
+</g>
+<g >
+<title>execute_command_internal:2(2) (32,942,923 samples, 0.02%)</title><rect x="22.0" y="469" width="0.2" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="24.99" y="479.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@plt:479(2),avg:1075912 (513,210,219 samples, 0.24%)</title><rect x="10.0" y="437" width="2.9" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" ></text>
+</g>
+<g >
+<title>os_file_io:882(1),avg:541430 (477,000,265 samples, 0.22%)</title><rect x="1155.2" y="405" width="2.7" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="1158.20" y="415.5" ></text>
+</g>
+<g >
+<title>ha_innobase::index_read:1041(1041) (2,186,347,880 samples, 1.03%)</title><rect x="1125.6" y="293" width="12.1" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="1128.56" y="303.5" ></text>
+</g>
+<g >
+<title>sel_set_rec_lock:1052(10),avg:193407 (203,294,022 samples, 0.10%)</title><rect x="1136.6" y="261" width="1.1" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="1139.58" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:587,avg:592284 (347,670,756 samples, 0.16%)</title><rect x="1185.5" y="277" width="1.9" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="1188.49" y="287.5" ></text>
+</g>
+<g >
+<title>ut_delay:2729,avg:7139 (19,481,148 samples, 0.01%)</title><rect x="1169.3" y="325" width="0.1" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="1172.28" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown]:475(1),avg:1051734 (498,521,759 samples, 0.23%)</title><rect x="1147.0" y="405" width="2.8" height="15.0" fill="rgb(243,174,41)" rx="2" ry="2" />
+<text  x="1150.05" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown]:50,avg:636144 (31,807,209 samples, 0.01%)</title><rect x="1125.1" y="117" width="0.1" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="1128.06" y="127.5" ></text>
+</g>
+<g >
+<title>ut_delay:103939,avg:7183 (746,551,574 samples, 0.35%)</title><rect x="27.1" y="133" width="4.1" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="30.08" y="143.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:2,avg:97931072 (195,862,143 samples, 0.09%)</title><rect x="1161.3" y="341" width="1.0" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="1164.25" y="351.5" ></text>
+</g>
+<g >
+<title>lock_sec_rec_modify_check_and_lock:1597,avg:16949 (27,067,863 samples, 0.01%)</title><rect x="1123.1" y="261" width="0.2" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="1126.13" y="271.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:2460(12),avg:184882 (615,910,996 samples, 0.29%)</title><rect x="23.7" y="117" width="3.4" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="26.65" y="127.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:11(8),avg:1361226 (317,099,222 samples, 0.15%)</title><rect x="1162.3" y="501" width="1.8" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1165.34" y="511.5" ></text>
+</g>
+<g >
+<title>ut_delay:86215,avg:7196 (620,436,476 samples, 0.29%)</title><rect x="1181.9" y="309" width="3.4" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="1184.88" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown]:1986,avg:71257 (141,515,918 samples, 0.07%)</title><rect x="1169.6" y="421" width="0.8" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="1172.65" y="431.5" ></text>
+</g>
+<g >
+<title>ut_delay:12259,avg:7088 (86,891,178 samples, 0.04%)</title><rect x="1115.5" y="133" width="0.5" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="1118.53" y="143.5" ></text>
+</g>
+<g >
+<title>ut_delay:5271,avg:7193 (37,915,729 samples, 0.02%)</title><rect x="1179.2" y="357" width="0.2" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1182.17" y="367.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:21(5),avg:40549379 (648,790,338 samples, 0.31%)</title><rect x="1164.1" y="421" width="3.6" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="1167.11" y="431.5" ></text>
+</g>
+<g >
+<title>send@plt:2659,avg:11403 (30,319,770 samples, 0.01%)</title><rect x="22.9" y="341" width="0.2" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="25.91" y="351.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:50,avg:638136 (31,906,788 samples, 0.02%)</title><rect x="1125.1" y="165" width="0.1" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="1128.06" y="175.5" ></text>
+</g>
+<g >
+<title>[unknown]:5(1),avg:100051770 (400,207,079 samples, 0.19%)</title><rect x="1157.9" y="405" width="2.2" height="15.0" fill="rgb(214,41,9)" rx="2" ry="2" />
+<text  x="1160.88" y="415.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1607(10),avg:586119 (942,494,697 samples, 0.44%)</title><rect x="1117.7" y="229" width="5.3" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="1120.72" y="239.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:134,avg:574354 (76,963,465 samples, 0.04%)</title><rect x="1189.0" y="325" width="0.4" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="1191.96" y="335.5" ></text>
+</g>
+<g >
+<title>Fil_shard::do_redo_io:883(2),avg:542119 (477,608,463 samples, 0.22%)</title><rect x="1155.2" y="453" width="2.7" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="1158.20" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:716(3),avg:50432 (35,957,792 samples, 0.02%)</title><rect x="1143.1" y="165" width="0.2" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="1146.08" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:355(6),avg:4378738 (1,528,179,972 samples, 0.72%)</title><rect x="1170.6" y="453" width="8.4" height="15.0" fill="rgb(206,8,2)" rx="2" ry="2" />
+<text  x="1173.55" y="463.5" ></text>
+</g>
+<g >
+<title>row_search_mvcc:1041(1041) (2,185,817,904 samples, 1.03%)</title><rect x="1125.6" y="277" width="12.1" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="1128.56" y="287.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:8430(4),avg:90400 (765,331,363 samples, 0.36%)</title><rect x="1107.9" y="149" width="4.2" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="1110.87" y="159.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@plt:10(1),avg:50049818 (450,448,476 samples, 0.21%)</title><rect x="19.5" y="453" width="2.5" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="22.48" y="463.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:3(1),avg:711 (196,259,908 samples, 0.09%)</title><rect x="1161.3" y="437" width="1.0" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="1164.25" y="447.5" ></text>
+</g>
+<g >
+<title>innobase_commit:6(6) (19,441,421 samples, 0.01%)</title><rect x="1160.1" y="421" width="0.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1163.14" y="431.5" ></text>
+</g>
+<g >
+<title>execute_command_internal:4,avg:8228032 (32,912,130 samples, 0.02%)</title><rect x="22.0" y="437" width="0.2" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="24.99" y="447.5" ></text>
+</g>
+<g >
+<title>os_file_write_func:882(1),avg:541670 (477,211,711 samples, 0.22%)</title><rect x="1155.2" y="437" width="2.7" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="1158.20" y="447.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:1269,avg:173985 (220,786,662 samples, 0.10%)</title><rect x="1137.8" y="181" width="1.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="1140.82" y="191.5" ></text>
+</g>
+<g >
+<title>handler::multi_range_read_next:1041(1041) (2,187,259,274 samples, 1.03%)</title><rect x="1125.6" y="341" width="12.1" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="1128.55" y="351.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:1048,avg:176671 (185,151,334 samples, 0.09%)</title><rect x="1133.8" y="149" width="1.0" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="1136.78" y="159.5" ></text>
+</g>
+<g >
+<title>srv_purge_coordinator_thread:1(1) (505,931,604 samples, 0.24%)</title><rect x="1167.7" y="501" width="2.8" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1170.74" y="511.5" ></text>
+</g>
+<g >
+<title>[unknown]:12(6),avg:52403538 (314,421,227 samples, 0.15%)</title><rect x="1162.3" y="405" width="1.8" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1165.35" y="415.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:2439(12),avg:496036 (1,371,355,737 samples, 0.65%)</title><rect x="23.6" y="149" width="7.6" height="15.0" fill="rgb(216,50,12)" rx="2" ry="2" />
+<text  x="26.61" y="159.5" ></text>
+</g>
+<g >
+<title>row_search_index_entry:213,avg:485810 (103,477,523 samples, 0.05%)</title><rect x="1189.4" y="421" width="0.6" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="1192.40" y="431.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:1998,avg:80648 (161,133,834 samples, 0.08%)</title><rect x="1168.1" y="325" width="0.9" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="1171.10" y="335.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:999,avg:161610 (161,448,118 samples, 0.08%)</title><rect x="1168.1" y="341" width="0.9" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="1171.10" y="351.5" ></text>
+</g>
+<g >
+<title>row_upd_sec_index_entry:1(1) (196,262,487 samples, 0.09%)</title><rect x="1161.3" y="485" width="1.0" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1164.25" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:2(1) (191,883,968 samples, 0.09%)</title><rect x="15.3" y="437" width="1.0" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="18.26" y="447.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:213,avg:172016 (36,639,337 samples, 0.02%)</title><rect x="1189.8" y="389" width="0.2" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="1192.77" y="399.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:345,avg:184738 (63,734,568 samples, 0.03%)</title><rect x="1168.1" y="293" width="0.4" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1171.12" y="303.5" ></text>
+</g>
+<g >
+<title>TTASEventMutex&lt;GenericPolicy&gt;::wait:759(6),avg:50238 (37,837,039 samples, 0.02%)</title><rect x="1143.1" y="245" width="0.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1146.08" y="255.5" ></text>
+</g>
+<g >
+<title>lock_trx_release_locks:2663(12),avg:240795 (641,393,832 samples, 0.30%)</title><rect x="1143.0" y="277" width="3.6" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1146.04" y="287.5" ></text>
+</g>
+<g >
+<title>row_upd_sec_index_entry:1597,avg:249895 (399,081,815 samples, 0.19%)</title><rect x="1123.1" y="293" width="2.2" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="1126.12" y="303.5" ></text>
+</g>
+<g >
+<title>btr_pcur_restore_position_func:1033(5),avg:497226 (513,124,299 samples, 0.24%)</title><rect x="1133.7" y="245" width="2.9" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1136.73" y="255.5" ></text>
+</g>
+<g >
+<title>nanosleep@plt:1986,avg:71267 (141,535,322 samples, 0.07%)</title><rect x="1169.6" y="453" width="0.8" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="1172.65" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:2(1) (191,883,966 samples, 0.09%)</title><rect x="15.3" y="421" width="1.0" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="18.26" y="431.5" ></text>
+</g>
+<g >
+<title>/global_root/:7335(7335) (212,303,804,240 samples, 100.00%)</title><rect x="10.0" y="517" width="1180.0" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" >/global_root/:7335(7335)</text>
+</g>
+<g >
+<title>[unknown]:75,avg:614768 (46,107,590 samples, 0.02%)</title><rect x="1169.0" y="245" width="0.3" height="15.0" fill="rgb(207,12,2)" rx="2" ry="2" />
+<text  x="1172.02" y="255.5" ></text>
+</g>
+<g >
+<title>__libc_nanosleep:1986,avg:71259 (141,519,858 samples, 0.07%)</title><rect x="1169.6" y="437" width="0.8" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="1172.65" y="447.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:2(1) (195,863,548 samples, 0.09%)</title><rect x="1161.3" y="389" width="1.0" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1164.25" y="399.5" ></text>
+</g>
+<g >
+<title>ut_delay:6238,avg:7185 (44,819,968 samples, 0.02%)</title><rect x="1146.4" y="261" width="0.2" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="1149.36" y="271.5" ></text>
+</g>
+<g >
+<title>trx_commit_for_mysql:2663(14),avg:254431 (677,222,440 samples, 0.32%)</title><rect x="1143.0" y="325" width="3.8" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="1145.99" y="335.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:27(16),avg:79429 (648,826,240 samples, 0.31%)</title><rect x="1164.1" y="485" width="3.6" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="1167.11" y="495.5" ></text>
+</g>
+<g >
+<title>RecLock::add_to_waitq:2525,avg:65739 (165,991,137 samples, 0.08%)</title><rect x="1116.6" y="165" width="0.9" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="1119.56" y="175.5" ></text>
+</g>
+<g >
+<title>row_upd_clust_step:1054(13),avg:610342 (642,473,298 samples, 0.30%)</title><rect x="1137.8" y="309" width="3.5" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1140.76" y="319.5" ></text>
+</g>
+<g >
+<title>row_purge_poss_sec:213,avg:371448 (79,118,395 samples, 0.04%)</title><rect x="1189.0" y="421" width="0.4" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="1191.96" y="431.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:9(3),avg:1056636 (167,296,060 samples, 0.08%)</title><rect x="1160.3" y="373" width="0.9" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="1163.30" y="383.5" ></text>
+</g>
+<g >
+<title>os_event_wait_time_low:479(2),avg:1076711 (513,591,087 samples, 0.24%)</title><rect x="10.0" y="485" width="2.9" height="15.0" fill="rgb(218,62,14)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown]:9(2),avg:23897805 (167,284,637 samples, 0.08%)</title><rect x="1160.3" y="325" width="0.9" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="1163.30" y="335.5" ></text>
+</g>
+<g >
+<title>row_purge_record_func:333,avg:819348 (272,842,833 samples, 0.13%)</title><rect x="1168.1" y="437" width="1.5" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1171.05" y="447.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:428,avg:55532 (23,767,801 samples, 0.01%)</title><rect x="1136.6" y="149" width="0.1" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="1139.59" y="159.5" ></text>
+</g>
+<g >
+<title>row_update_for_mysql_using_upd_graph:1608(11),avg:858163 (1,379,723,164 samples, 0.65%)</title><rect x="1117.7" y="325" width="7.6" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="1120.68" y="335.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::LockSysGuard:1052(9),avg:188894 (198,487,118 samples, 0.09%)</title><rect x="1136.6" y="229" width="1.1" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="1139.58" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:36,avg:673154 (24,233,548 samples, 0.01%)</title><rect x="1142.6" y="165" width="0.1" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="1145.58" y="175.5" ></text>
+</g>
+<g >
+<title>row_mysql_handle_errors:1028(1017),avg:132504638 (1,461,076,693 samples, 0.69%)</title><rect x="1125.6" y="261" width="8.1" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="1128.60" y="271.5" ></text>
+</g>
+<g >
+<title>Protocol_classic::read_packet:2661(4),avg:43233 (114,885,544 samples, 0.05%)</title><rect x="22.2" y="453" width="0.6" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="25.18" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown]:882(1),avg:541259 (476,848,844 samples, 0.22%)</title><rect x="1155.2" y="341" width="2.7" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="1158.20" y="351.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1597,avg:163434 (261,004,620 samples, 0.12%)</title><rect x="1123.9" y="261" width="1.4" height="15.0" fill="rgb(247,196,47)" rx="2" ry="2" />
+<text  x="1126.89" y="271.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:1269,avg:173985 (220,786,662 samples, 0.10%)</title><rect x="1137.8" y="197" width="1.2" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="1140.82" y="207.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:587,avg:593638 (348,465,483 samples, 0.16%)</title><rect x="1185.5" y="325" width="1.9" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="1188.49" y="335.5" ></text>
+</g>
+<g >
+<title>MYSQL_RDS_AUDIT_LOG::flush_thread_sleep_if_need:11(2),avg:50051192 (450,462,304 samples, 0.21%)</title><rect x="19.5" y="485" width="2.5" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="22.48" y="495.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:7985,avg:5767 (46,050,932 samples, 0.02%)</title><rect x="1125.1" y="229" width="0.2" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
+<text  x="1128.06" y="239.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:36,avg:675124 (24,304,460 samples, 0.01%)</title><rect x="1142.6" y="213" width="0.1" height="15.0" fill="rgb(251,216,51)" rx="2" ry="2" />
+<text  x="1145.58" y="223.5" ></text>
+</g>
+<g >
+<title>handler::ha_update_row:1056(15),avg:861169 (907,499,995 samples, 0.43%)</title><rect x="1137.7" y="389" width="5.1" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1140.74" y="399.5" ></text>
+</g>
+<g >
+<title>ut_delay:9807,avg:7139 (70,007,318 samples, 0.03%)</title><rect x="1124.7" y="197" width="0.4" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="1127.67" y="207.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:36,avg:674777 (24,291,971 samples, 0.01%)</title><rect x="1142.6" y="197" width="0.1" height="15.0" fill="rgb(206,9,2)" rx="2" ry="2" />
+<text  x="1145.58" y="207.5" ></text>
+</g>
+<g >
+<title>TTASEventMutex&lt;GenericPolicy&gt;::wait:450(2),avg:54314 (24,337,462 samples, 0.01%)</title><rect x="1136.6" y="197" width="0.1" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="1139.59" y="207.5" ></text>
+</g>
+<g >
+<title>RecLock::deadlock_check:2525,avg:25313 (63,915,242 samples, 0.03%)</title><rect x="1116.8" y="149" width="0.4" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1119.84" y="159.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:57,avg:620082 (35,344,696 samples, 0.02%)</title><rect x="1123.7" y="197" width="0.2" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="1126.66" y="207.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:333,avg:198952 (66,251,033 samples, 0.03%)</title><rect x="1169.0" y="357" width="0.4" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="1172.02" y="367.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:333,avg:231716 (77,161,274 samples, 0.04%)</title><rect x="1169.0" y="389" width="0.4" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1172.02" y="399.5" ></text>
+</g>
+<g >
+<title>QUICK_RANGE_SELECT::get_next:2097(1041),avg:520 (2,188,000,251 samples, 1.03%)</title><rect x="1125.5" y="373" width="12.2" height="15.0" fill="rgb(233,129,30)" rx="2" ry="2" />
+<text  x="1128.55" y="383.5" ></text>
+</g>
+<g >
+<title>handler::ha_update_row:1608(11),avg:860003 (1,382,676,044 samples, 0.65%)</title><rect x="1117.7" y="373" width="7.6" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="1120.66" y="383.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1607(11),avg:588365 (948,237,671 samples, 0.45%)</title><rect x="1117.7" y="261" width="5.3" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="1120.70" y="271.5" ></text>
+</g>
+<g >
+<title>parse_sql:2659,avg:13731 (36,509,805 samples, 0.02%)</title><rect x="1146.8" y="437" width="0.2" height="15.0" fill="rgb(229,114,27)" rx="2" ry="2" />
+<text  x="1149.77" y="447.5" ></text>
+</g>
+<g >
+<title>srv_worker_thread:7(7) (3,499,478,060 samples, 1.65%)</title><rect x="1170.5" y="501" width="19.5" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="1173.55" y="511.5" ></text>
+</g>
+<g >
+<title>sel_set_rec_lock:14(10),avg:278642 (170,450,283 samples, 0.08%)</title><rect x="1160.3" y="485" width="0.9" height="15.0" fill="rgb(223,82,19)" rx="2" ry="2" />
+<text  x="1163.30" y="495.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1063,avg:68114 (72,405,010 samples, 0.03%)</title><rect x="1141.5" y="261" width="0.4" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="1144.46" y="271.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:1605(3),avg:178987 (286,737,931 samples, 0.14%)</title><rect x="1107.9" y="85" width="1.6" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1110.93" y="95.5" ></text>
+</g>
+<g >
+<title>log_writer:1(1) (500,064,331 samples, 0.24%)</title><rect x="1155.1" y="501" width="2.8" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1158.10" y="511.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:717(3),avg:51617 (36,854,816 samples, 0.02%)</title><rect x="1143.1" y="197" width="0.2" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1146.08" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown]:1938(7),avg:172474 (333,048,205 samples, 0.16%)</title><rect x="1117.8" y="117" width="1.8" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1120.79" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown]:51(1),avg:1052677 (52,633,865 samples, 0.02%)</title><rect x="1167.7" y="437" width="0.3" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1170.75" y="447.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::LockSysGuard:2088,avg:21040 (43,931,144 samples, 0.02%)</title><rect x="1179.1" y="389" width="0.3" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="1182.14" y="399.5" ></text>
+</g>
+<g >
+<title>innobase_commit_low:2663(14),avg:254467 (677,320,505 samples, 0.32%)</title><rect x="1143.0" y="341" width="3.8" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1145.99" y="351.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:1922(7),avg:174344 (333,868,560 samples, 0.16%)</title><rect x="1117.8" y="133" width="1.8" height="15.0" fill="rgb(247,193,46)" rx="2" ry="2" />
+<text  x="1120.79" y="143.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:4215(4),avg:181305 (767,096,989 samples, 0.36%)</title><rect x="1107.9" y="165" width="4.2" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1110.86" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@plt:5(1),avg:100052635 (400,210,671 samples, 0.19%)</title><rect x="1157.9" y="437" width="2.2" height="15.0" fill="rgb(226,101,24)" rx="2" ry="2" />
+<text  x="1160.88" y="447.5" ></text>
+</g>
+<g >
+<title>handler::read_range_first:1041(1041) (2,187,123,340 samples, 1.03%)</title><rect x="1125.6" y="325" width="12.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="1128.55" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown]:6(1),avg:89199481 (445,997,403 samples, 0.21%)</title><rect x="1149.8" y="405" width="2.5" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="1152.82" y="415.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:2,avg:97931070 (195,862,140 samples, 0.09%)</title><rect x="1161.3" y="325" width="1.0" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="1164.25" y="335.5" ></text>
+</g>
+<g >
+<title>handler::ha_multi_range_read_next:4256(1052),avg:60493556 (196,837,098,492 samples, 92.71%)</title><rect x="23.5" y="341" width="1094.1" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="26.54" y="351.5" >handler::ha_multi_range_read_next:4256(1052),avg:60493556</text>
+</g>
+<g >
+<title>all (212,303,804,240 samples, 100%)</title><rect x="10.0" y="533" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:37,avg:588741 (21,783,403 samples, 0.01%)</title><rect x="1141.5" y="133" width="0.1" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="1144.51" y="143.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:213,avg:485792 (103,473,688 samples, 0.05%)</title><rect x="1189.4" y="405" width="0.6" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="1192.40" y="415.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:9(2),avg:23898231 (167,287,731 samples, 0.08%)</title><rect x="1160.3" y="341" width="0.9" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
+<text  x="1163.30" y="351.5" ></text>
+</g>
+<g >
+<title>os_event_wait_time_low:3688(1),avg:136557 (503,485,537 samples, 0.24%)</title><rect x="1152.3" y="485" width="2.8" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="1155.30" y="495.5" ></text>
+</g>
+<g >
+<title>os_event_wait_time_low:5(1),avg:100054124 (400,216,918 samples, 0.19%)</title><rect x="1157.9" y="485" width="2.2" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="1160.88" y="495.5" ></text>
+</g>
+<g >
+<title>THD::send_statement_status:2659,avg:12938 (34,401,127 samples, 0.02%)</title><rect x="22.9" y="453" width="0.2" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="25.89" y="463.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:2288(1),avg:185186 (423,519,947 samples, 0.20%)</title><rect x="1179.5" y="277" width="2.4" height="15.0" fill="rgb(248,200,47)" rx="2" ry="2" />
+<text  x="1182.52" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:167,avg:174245 (29,098,835 samples, 0.01%)</title><rect x="1189.0" y="245" width="0.1" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="1191.97" y="255.5" ></text>
+</g>
+<g >
+<title>[unknown]:355(6),avg:4378382 (1,528,055,243 samples, 0.72%)</title><rect x="1170.6" y="421" width="8.4" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="1173.55" y="431.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:3162,avg:50279 (158,981,264 samples, 0.07%)</title><rect x="1141.9" y="261" width="0.9" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="1144.88" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:52,avg:557422 (28,985,955 samples, 0.01%)</title><rect x="1123.4" y="117" width="0.2" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1126.43" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown]:2313(1),avg:180755 (417,904,791 samples, 0.20%)</title><rect x="1179.5" y="229" width="2.3" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="1182.53" y="239.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::acquire:1597,avg:16208 (25,883,593 samples, 0.01%)</title><rect x="1123.1" y="229" width="0.2" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="1126.13" y="239.5" ></text>
+</g>
+<g >
+<title>lock_clust_rec_read_check_and_lock:4142(9),avg:234034 (972,592,242 samples, 0.46%)</title><rect x="1112.2" y="197" width="5.4" height="15.0" fill="rgb(233,129,31)" rx="2" ry="2" />
+<text  x="1115.16" y="207.5" ></text>
+</g>
+<g >
+<title>THD::sql_parser:2659,avg:13290 (35,338,556 samples, 0.02%)</title><rect x="1146.8" y="421" width="0.2" height="15.0" fill="rgb(247,193,46)" rx="2" ry="2" />
+<text  x="1149.78" y="431.5" ></text>
+</g>
+<g >
+<title>trx_commit_for_mysql:6(6) (19,439,270 samples, 0.01%)</title><rect x="1160.1" y="389" width="0.1" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="1163.14" y="399.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:39,avg:663390 (25,872,196 samples, 0.01%)</title><rect x="1123.7" y="133" width="0.1" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="1126.66" y="143.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:2459(10),avg:249484 (610,985,472 samples, 0.29%)</title><rect x="23.7" y="85" width="3.3" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="26.65" y="95.5" ></text>
+</g>
+<g >
+<title>DeadlockChecker::get_next_lock:271973,avg:167 (45,393,542 samples, 0.02%)</title><rect x="1116.9" y="101" width="0.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1119.88" y="111.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:12(6),avg:52404162 (314,425,238 samples, 0.15%)</title><rect x="1162.3" y="437" width="1.8" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="1165.35" y="447.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1597,avg:26466 (42,266,027 samples, 0.02%)</title><rect x="1123.4" y="213" width="0.3" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="1126.43" y="223.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:5838,avg:86450 (504,695,688 samples, 0.24%)</title><rect x="1133.7" y="197" width="2.8" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="1136.74" y="207.5" ></text>
+</g>
+<g >
+<title>Protocol_classic::send_ok:2659,avg:12839 (34,140,211 samples, 0.02%)</title><rect x="22.9" y="437" width="0.2" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="25.89" y="447.5" ></text>
+</g>
+<g >
+<title>btr_pcur_restore_position_func:1054(13),avg:593486 (624,687,916 samples, 0.29%)</title><rect x="1137.8" y="293" width="3.4" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="1140.76" y="303.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:345,avg:184443 (63,632,762 samples, 0.03%)</title><rect x="1168.1" y="277" width="0.4" height="15.0" fill="rgb(217,59,14)" rx="2" ry="2" />
+<text  x="1171.12" y="287.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:5302,avg:5894 (31,250,345 samples, 0.01%)</title><rect x="1141.7" y="229" width="0.2" height="15.0" fill="rgb(254,225,53)" rx="2" ry="2" />
+<text  x="1144.68" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:268,avg:506263 (135,678,446 samples, 0.06%)</title><rect x="1123.9" y="149" width="0.8" height="15.0" fill="rgb(235,142,34)" rx="2" ry="2" />
+<text  x="1126.92" y="159.5" ></text>
+</g>
+<g >
+<title>log_flush_notifier:1(1) (446,010,711 samples, 0.21%)</title><rect x="1149.8" y="501" width="2.5" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1152.82" y="511.5" ></text>
+</g>
+<g >
+<title>lock_rec_convert_impl_to_expl:4142(1),avg:27478 (114,041,425 samples, 0.05%)</title><rect x="1115.5" y="181" width="0.6" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="1118.47" y="191.5" ></text>
+</g>
+<g >
+<title>ReplicaSyncState::master_update_routine:1(1) (405,905,698 samples, 0.19%)</title><rect x="12.9" y="501" width="2.2" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="15.89" y="511.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:717(3),avg:51617 (36,854,816 samples, 0.02%)</title><rect x="1143.1" y="213" width="0.2" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="1146.08" y="223.5" ></text>
+</g>
+<g >
+<title>os_event::wait_time_low:3688(1),avg:136557 (503,485,537 samples, 0.24%)</title><rect x="1152.3" y="469" width="2.8" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1155.30" y="479.5" ></text>
+</g>
+<g >
+<title>trans_commit_stmt:2663(14),avg:260344 (692,936,019 samples, 0.33%)</title><rect x="1142.9" y="421" width="3.9" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="1145.92" y="431.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:52,avg:558778 (29,056,482 samples, 0.01%)</title><rect x="1123.4" y="181" width="0.2" height="15.0" fill="rgb(218,59,14)" rx="2" ry="2" />
+<text  x="1126.43" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:153,avg:518099 (79,269,208 samples, 0.04%)</title><rect x="1141.9" y="165" width="0.4" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1144.89" y="175.5" ></text>
+</g>
+<g >
+<title>row_search_index_entry:1597,avg:163462 (261,048,930 samples, 0.12%)</title><rect x="1123.9" y="277" width="1.4" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="1126.89" y="287.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:2(1) (195,863,450 samples, 0.09%)</title><rect x="1161.3" y="357" width="1.0" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="1164.25" y="367.5" ></text>
+</g>
+<g >
+<title>lock_grant_cats:2659,avg:66490 (176,796,282 samples, 0.08%)</title><rect x="1145.3" y="229" width="1.0" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1148.35" y="239.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:75,avg:616502 (46,237,636 samples, 0.02%)</title><rect x="1169.0" y="309" width="0.3" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="1172.02" y="319.5" ></text>
+</g>
+<g >
+<title>Sql_cmd_update::prepare_inner:2659,avg:7046 (18,734,476 samples, 0.01%)</title><rect x="23.3" y="389" width="0.1" height="15.0" fill="rgb(205,4,0)" rx="2" ry="2" />
+<text  x="26.29" y="399.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:2296,avg:218021 (500,576,040 samples, 0.24%)</title><rect x="1185.5" y="357" width="2.8" height="15.0" fill="rgb(220,73,17)" rx="2" ry="2" />
+<text  x="1188.47" y="367.5" ></text>
+</g>
+<g >
+<title>SyncFileIO::execute:882(1),avg:541396 (476,969,851 samples, 0.22%)</title><rect x="1155.2" y="389" width="2.7" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="1158.20" y="399.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:3189,avg:21896 (69,827,173 samples, 0.03%)</title><rect x="1141.5" y="245" width="0.4" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="1144.47" y="255.5" ></text>
+</g>
+<g >
+<title>TTASEventMutex&lt;GenericPolicy&gt;::wait:2(2) (191,888,993 samples, 0.09%)</title><rect x="15.3" y="501" width="1.0" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="18.26" y="511.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1054,avg:153991 (162,306,102 samples, 0.08%)</title><rect x="1141.9" y="277" width="0.9" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="1144.88" y="287.5" ></text>
+</g>
+<g >
+<title>MYSQLparse:2659,avg:9356 (24,877,195 samples, 0.01%)</title><rect x="1146.8" y="405" width="0.2" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="1149.84" y="415.5" ></text>
+</g>
+<g >
+<title>row_search_on_row_ref:2302(7),avg:462971 (1,066,023,989 samples, 0.50%)</title><rect x="1179.4" y="389" width="6.0" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1182.43" y="399.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::LockSysGuard:4141(8),avg:141930 (591,611,646 samples, 0.28%)</title><rect x="1112.2" y="181" width="3.2" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="1115.16" y="191.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1405(6),avg:544015 (770,777,472 samples, 0.36%)</title><rect x="1107.9" y="181" width="4.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1110.86" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:1206(2),avg:54229 (65,292,326 samples, 0.03%)</title><rect x="1112.2" y="85" width="0.4" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1115.21" y="95.5" ></text>
+</g>
+<g >
+<title>affinity__set:48(48) (502,145,176 samples, 0.24%)</title><rect x="16.7" y="469" width="2.8" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="19.66" y="479.5" ></text>
+</g>
+<g >
+<title>ut_delay:65098,avg:7190 (468,078,496 samples, 0.22%)</title><rect x="1109.5" y="117" width="2.6" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="1112.53" y="127.5" ></text>
+</g>
+<g >
+<title>mysql_parse:3725(2132),avg:121404247 (202,200,523,960 samples, 95.24%)</title><rect x="23.1" y="453" width="1123.9" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="26.14" y="463.5" >mysql_parse:3725(2132),avg:121404247</text>
+</g>
+<g >
+<title>os_event::wait_low:75,avg:616502 (46,237,636 samples, 0.02%)</title><rect x="1169.0" y="293" width="0.3" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="1172.02" y="303.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:430(2),avg:55802 (23,887,727 samples, 0.01%)</title><rect x="1136.6" y="181" width="0.1" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="1139.59" y="191.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:11480,avg:10098 (115,928,450 samples, 0.05%)</title><rect x="1188.3" y="373" width="0.6" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="1191.25" y="383.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:3136(13),avg:196598 (620,815,100 samples, 0.29%)</title><rect x="1137.8" y="261" width="3.4" height="15.0" fill="rgb(223,87,20)" rx="2" ry="2" />
+<text  x="1140.77" y="271.5" ></text>
+</g>
+<g >
+<title>ut_delay:23781,avg:7187 (170,909,789 samples, 0.08%)</title><rect x="1136.7" y="197" width="1.0" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="1139.73" y="207.5" ></text>
+</g>
+<g >
+<title>row_upd_step:1056(15),avg:857045 (903,187,857 samples, 0.43%)</title><rect x="1137.8" y="325" width="5.0" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1140.76" y="335.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:587,avg:593638 (348,465,483 samples, 0.16%)</title><rect x="1185.5" y="309" width="1.9" height="15.0" fill="rgb(216,50,12)" rx="2" ry="2" />
+<text  x="1188.49" y="319.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:2525(1025),avg:129106301 (193,667,131,590 samples, 91.22%)</title><rect x="31.4" y="181" width="1076.4" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="34.42" y="191.5" >os_event_wait_low:2525(1025),avg:129106301</text>
+</g>
+<g >
+<title>pthread_cond_timedwait@@GLIBC_2.3.2:5(1),avg:100052619 (400,210,592 samples, 0.19%)</title><rect x="1157.9" y="421" width="2.2" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="1160.88" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown]:10(1),avg:50049494 (450,445,445 samples, 0.21%)</title><rect x="19.5" y="421" width="2.5" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="22.48" y="431.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:54,avg:625542 (33,779,252 samples, 0.02%)</title><rect x="1189.5" y="325" width="0.2" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1192.50" y="335.5" ></text>
+</g>
+<g >
+<title>sel_restore_position_for_mysql:1033(5),avg:497243 (513,141,996 samples, 0.24%)</title><rect x="1133.7" y="261" width="2.9" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="1136.73" y="271.5" ></text>
+</g>
+<g >
+<title>test_quick_select:2659,avg:6783 (18,036,360 samples, 0.01%)</title><rect x="1125.4" y="373" width="0.1" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="1128.44" y="383.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:2(2) (191,885,419 samples, 0.09%)</title><rect x="15.3" y="469" width="1.0" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="18.26" y="479.5" ></text>
+</g>
+<g >
+<title>TC_LOG_DUMMY::commit:6(6) (19,441,948 samples, 0.01%)</title><rect x="1160.1" y="453" width="0.1" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="1163.14" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:9(2),avg:23898236 (167,287,766 samples, 0.08%)</title><rect x="1160.3" y="357" width="0.9" height="15.0" fill="rgb(212,33,7)" rx="2" ry="2" />
+<text  x="1163.30" y="367.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:2302(7),avg:462950 (1,065,976,507 samples, 0.50%)</title><rect x="1179.4" y="373" width="6.0" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1182.43" y="383.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:37,avg:590196 (21,837,245 samples, 0.01%)</title><rect x="1141.5" y="197" width="0.1" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="1144.51" y="207.5" ></text>
+</g>
+<g >
+<title>row_purge_remove_sec_if_poss_tree:25,avg:884056 (22,101,412 samples, 0.01%)</title><rect x="1169.4" y="421" width="0.2" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="1172.44" y="431.5" ></text>
+</g>
+<g >
+<title>row_purge_record_func:2302(7),avg:849571 (1,953,965,494 samples, 0.92%)</title><rect x="1179.1" y="453" width="10.9" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="1182.11" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:2525(1022),avg:128852708 (193,665,748,022 samples, 91.22%)</title><rect x="31.4" y="149" width="1076.4" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="34.42" y="159.5" >pthread_cond_wait@plt:2525(1022),avg:128852708</text>
+</g>
+<g >
+<title>os_event_wait_low:355(6),avg:4379569 (1,528,470,005 samples, 0.72%)</title><rect x="1170.6" y="485" width="8.4" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="1173.55" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:108,avg:803186 (86,744,040 samples, 0.04%)</title><rect x="1188.3" y="277" width="0.4" height="15.0" fill="rgb(248,200,48)" rx="2" ry="2" />
+<text  x="1191.26" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown]:1 (32,204,449 samples, 0.02%)</title><rect x="22.0" y="325" width="0.2" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="24.99" y="335.5" ></text>
+</g>
+<g >
+<title>Sql_cmd_dml::prepare:2659,avg:17144 (45,585,126 samples, 0.02%)</title><rect x="23.3" y="405" width="0.2" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="26.27" y="415.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1597,avg:130211 (207,946,191 samples, 0.10%)</title><rect x="1123.9" y="213" width="1.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1126.91" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:153,avg:518098 (79,268,930 samples, 0.04%)</title><rect x="1141.9" y="149" width="0.4" height="15.0" fill="rgb(216,52,12)" rx="2" ry="2" />
+<text  x="1144.89" y="159.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:167,avg:176206 (29,426,381 samples, 0.01%)</title><rect x="1189.0" y="277" width="0.1" height="15.0" fill="rgb(232,125,30)" rx="2" ry="2" />
+<text  x="1191.97" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:52,avg:557425 (28,986,116 samples, 0.01%)</title><rect x="1123.4" y="133" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="1126.43" y="143.5" ></text>
+</g>
+<g >
+<title>lock_trx_release_locks:6(6) (19,365,409 samples, 0.01%)</title><rect x="1160.1" y="341" width="0.1" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="1163.14" y="351.5" ></text>
+</g>
+<g >
+<title>row_search_index_entry:1055,avg:153870 (162,332,599 samples, 0.08%)</title><rect x="1141.9" y="293" width="0.9" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="1144.88" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:37,avg:588742 (21,783,462 samples, 0.01%)</title><rect x="1141.5" y="149" width="0.1" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="1144.51" y="159.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:136,avg:569099 (77,397,414 samples, 0.04%)</title><rect x="1189.0" y="373" width="0.4" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="1191.96" y="383.5" ></text>
+</g>
+<g >
+<title>log_written_aio:1(1) (400,224,822 samples, 0.19%)</title><rect x="1157.9" y="501" width="2.2" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="1160.88" y="511.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:587,avg:593951 (348,649,353 samples, 0.16%)</title><rect x="1185.5" y="341" width="1.9" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="1188.49" y="351.5" ></text>
+</g>
+<g >
+<title>ut_delay:3140,avg:7209 (22,635,696 samples, 0.01%)</title><rect x="1123.1" y="213" width="0.2" height="15.0" fill="rgb(253,225,53)" rx="2" ry="2" />
+<text  x="1126.14" y="223.5" ></text>
+</g>
+<g >
+<title>RecLock::lock_add:2525,avg:19218 (48,524,776 samples, 0.02%)</title><rect x="1116.6" y="133" width="0.2" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="1119.56" y="143.5" ></text>
+</g>
+<g >
+<title>[unknown]:108,avg:802863 (86,709,241 samples, 0.04%)</title><rect x="1188.3" y="261" width="0.4" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="1191.26" y="271.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:20(11),avg:62312 (314,439,708 samples, 0.15%)</title><rect x="1162.3" y="485" width="1.8" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="1165.35" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown]:13,avg:2493875 (32,420,376 samples, 0.02%)</title><rect x="22.0" y="405" width="0.2" height="15.0" fill="rgb(210,25,6)" rx="2" ry="2" />
+<text  x="24.99" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown]:2659,avg:11238 (29,880,944 samples, 0.01%)</title><rect x="22.9" y="309" width="0.2" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="25.91" y="319.5" ></text>
+</g>
+<g >
+<title>ut_delay:13082,avg:7290 (95,363,545 samples, 0.04%)</title><rect x="1168.5" y="293" width="0.5" height="15.0" fill="rgb(205,0,0)" rx="2" ry="2" />
+<text  x="1171.47" y="303.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:11,avg:132500873 (1,457,509,605 samples, 0.69%)</title><rect x="1125.6" y="213" width="8.1" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="1128.61" y="223.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:21(11),avg:471798 (648,817,016 samples, 0.31%)</title><rect x="1164.1" y="469" width="3.6" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="1167.11" y="479.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:39,avg:797321 (31,095,532 samples, 0.01%)</title><rect x="1141.7" y="213" width="0.2" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1144.68" y="223.5" ></text>
+</g>
+<g >
+<title>row_ins_sec_index_entry:1597,avg:66868 (106,787,672 samples, 0.05%)</title><rect x="1123.3" y="277" width="0.6" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="1126.30" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown]:1059,avg:172391 (182,562,427 samples, 0.09%)</title><rect x="1133.8" y="85" width="1.0" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="1136.78" y="95.5" ></text>
+</g>
+<g >
+<title>ut_delay:20717,avg:7159 (148,313,108 samples, 0.07%)</title><rect x="1187.4" y="341" width="0.9" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1190.43" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown]:1223(2),avg:52985 (64,694,325 samples, 0.03%)</title><rect x="1112.2" y="53" width="0.4" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="1115.21" y="63.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:108,avg:805256 (86,967,690 samples, 0.04%)</title><rect x="1188.3" y="341" width="0.4" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="1191.26" y="351.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@@GLIBC_2.3.2:10(1),avg:50049808 (450,448,382 samples, 0.21%)</title><rect x="19.5" y="437" width="2.5" height="15.0" fill="rgb(218,62,14)" rx="2" ry="2" />
+<text  x="22.48" y="447.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:39,avg:663387 (25,872,086 samples, 0.01%)</title><rect x="1123.7" y="117" width="0.1" height="15.0" fill="rgb(244,179,43)" rx="2" ry="2" />
+<text  x="1126.66" y="127.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:6894(7),avg:153635 (1,061,584,672 samples, 0.50%)</title><rect x="1179.4" y="357" width="5.9" height="15.0" fill="rgb(221,73,17)" rx="2" ry="2" />
+<text  x="1182.44" y="367.5" ></text>
+</g>
+<g >
+<title>row_update_for_mysql_using_upd_graph:1056(15),avg:859129 (905,362,284 samples, 0.43%)</title><rect x="1137.7" y="341" width="5.1" height="15.0" fill="rgb(216,55,13)" rx="2" ry="2" />
+<text  x="1140.75" y="351.5" ></text>
+</g>
+<g >
+<title>row_ins_sec_index_entry_low:1063,avg:78807 (83,772,022 samples, 0.04%)</title><rect x="1141.4" y="277" width="0.5" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="1144.41" y="287.5" ></text>
+</g>
+<g >
+<title>ppoll:2659(2),avg:37232 (98,925,454 samples, 0.05%)</title><rect x="22.3" y="325" width="0.5" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="25.27" y="335.5" ></text>
+</g>
+<g >
+<title>__libc_nanosleep:5(1),avg:100054740 (400,219,012 samples, 0.19%)</title><rect x="12.9" y="453" width="2.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="15.92" y="463.5" ></text>
+</g>
+<g >
+<title>[unknown]:153,avg:517735 (79,213,420 samples, 0.04%)</title><rect x="1141.9" y="133" width="0.4" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="1144.89" y="143.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:1605(3),avg:178987 (286,737,931 samples, 0.14%)</title><rect x="1107.9" y="101" width="1.6" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="1110.93" y="111.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:1603(3),avg:177239 (283,582,787 samples, 0.13%)</title><rect x="1107.9" y="53" width="1.6" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="1110.93" y="63.5" ></text>
+</g>
+<g >
+<title>btr_cur_optimistic_delete_func:2301,avg:20330 (46,778,690 samples, 0.02%)</title><rect x="1179.1" y="421" width="0.3" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="1182.13" y="431.5" ></text>
+</g>
+<g >
+<title>[unknown]:479(2),avg:1075687 (513,102,724 samples, 0.24%)</title><rect x="10.0" y="405" width="2.9" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1(1) (196,258,141 samples, 0.09%)</title><rect x="1161.3" y="405" width="1.0" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="1164.25" y="415.5" ></text>
+</g>
+<g >
+<title>DsMrr_impl::dsmrr_next:4256(1052),avg:60493503 (196,836,889,924 samples, 92.71%)</title><rect x="23.5" y="309" width="1094.1" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="26.54" y="319.5" >DsMrr_impl::dsmrr_next:4256(1052),avg:60493503</text>
+</g>
+<g >
+<title>Sql_cmd_update::execute_inner:2659(1062),avg:121035231 (198,272,663,615 samples, 93.39%)</title><rect x="23.5" y="405" width="1102.0" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="26.52" y="415.5" >Sql_cmd_update::execute_inner:2659(1062),avg:121035231</text>
+</g>
+<g >
+<title>LockSysGuard::acquire:5320(12),avg:76426 (408,122,717 samples, 0.19%)</title><rect x="1143.0" y="261" width="2.3" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="1146.05" y="271.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:11,avg:132500873 (1,457,509,605 samples, 0.69%)</title><rect x="1125.6" y="229" width="8.1" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="1128.61" y="239.5" ></text>
+</g>
+<g >
+<title>__libc_send:2659,avg:11398 (30,308,226 samples, 0.01%)</title><rect x="22.9" y="325" width="0.2" height="15.0" fill="rgb(209,19,4)" rx="2" ry="2" />
+<text  x="25.91" y="335.5" ></text>
+</g>
+<g >
+<title>row_mysql_handle_errors:2525(1025),avg:129110536 (193,676,075,660 samples, 91.23%)</title><rect x="31.4" y="213" width="1076.4" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="34.38" y="223.5" >row_mysql_handle_errors:2525(1025),avg:129110536</text>
+</g>
+<g >
+<title>handler::ha_multi_range_read_next:2097(1041),avg:457 (2,187,779,001 samples, 1.03%)</title><rect x="1125.5" y="357" width="12.2" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="1128.55" y="367.5" ></text>
+</g>
+<g >
+<title>[unknown]:2484(10),avg:246392 (609,573,518 samples, 0.29%)</title><rect x="23.7" y="53" width="3.3" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="26.66" y="63.5" ></text>
+</g>
+<g >
+<title>QUICK_RANGE_SELECT::get_next:4256(1052),avg:60493652 (196,837,420,065 samples, 92.71%)</title><rect x="23.5" y="357" width="1094.1" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="26.54" y="367.5" >QUICK_RANGE_SELECT::get_next:4256(1052),avg:60493652</text>
+</g>
+<g >
+<title>pthread_cond_timedwait@@GLIBC_2.3.2:475(1),avg:1051953 (498,625,992 samples, 0.23%)</title><rect x="1147.0" y="421" width="2.8" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="1150.05" y="431.5" ></text>
+</g>
+<g >
+<title>waitpid@plt:1 (36,193,244 samples, 0.02%)</title><rect x="16.5" y="485" width="0.2" height="15.0" fill="rgb(217,58,13)" rx="2" ry="2" />
+<text  x="19.46" y="495.5" ></text>
+</g>
+<g >
+<title>mysql_execute_command:3725(2132),avg:121384458 (202,147,738,879 samples, 95.22%)</title><rect x="23.2" y="437" width="1123.6" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="26.22" y="447.5" >mysql_execute_command:3725(2132),avg:121384458</text>
+</g>
+<g >
+<title>DeadlockChecker::search:2525,avg:23928 (60,417,479 samples, 0.03%)</title><rect x="1116.9" y="117" width="0.3" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="1119.85" y="127.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::acquire:2088,avg:20833 (43,499,184 samples, 0.02%)</title><rect x="1179.1" y="373" width="0.3" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="1182.14" y="383.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:1048,avg:174738 (183,124,933 samples, 0.09%)</title><rect x="1133.8" y="117" width="1.0" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="1136.78" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown]:167,avg:173817 (29,027,449 samples, 0.01%)</title><rect x="1189.0" y="229" width="0.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1191.97" y="239.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:1924(8),avg:176037 (337,612,766 samples, 0.16%)</title><rect x="1117.8" y="197" width="1.9" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="1120.79" y="207.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:1276(5),avg:174023 (221,206,555 samples, 0.10%)</title><rect x="1137.8" y="213" width="1.3" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="1140.82" y="223.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:6888,avg:89896 (619,202,837 samples, 0.29%)</title><rect x="1185.5" y="389" width="3.4" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="1188.46" y="399.5" ></text>
+</g>
+<g >
+<title>log_closer:1(1) (502,980,974 samples, 0.24%)</title><rect x="1147.0" y="501" width="2.8" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="1150.03" y="511.5" ></text>
+</g>
+<g >
+<title>row_purge_reposition_pcur:213,avg:364513 (77,641,204 samples, 0.04%)</title><rect x="1189.0" y="405" width="0.4" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1191.96" y="415.5" ></text>
+</g>
+<g >
+<title>std::this_thread::sleep_for&lt;long, std::ratio&lt;1l, 1000000l&gt; &gt;:6(2),avg:100054972 (400,220,273 samples, 0.19%)</title><rect x="12.9" y="485" width="2.2" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="15.92" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@plt:3688(1),avg:135855 (500,897,184 samples, 0.24%)</title><rect x="1152.3" y="437" width="2.8" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="1155.31" y="447.5" ></text>
+</g>
+<g >
+<title>row_upd_step:1608(11),avg:856277 (1,376,693,182 samples, 0.65%)</title><rect x="1117.7" y="309" width="7.6" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="1120.69" y="319.5" ></text>
+</g>
+<g >
+<title>row_purge_step:2308(7),avg:854225 (1,969,776,409 samples, 0.93%)</title><rect x="1179.0" y="469" width="11.0" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="1182.05" y="479.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:50,avg:638136 (31,906,788 samples, 0.02%)</title><rect x="1125.1" y="181" width="0.1" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="1128.06" y="191.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:50,avg:638468 (31,923,393 samples, 0.02%)</title><rect x="1125.1" y="197" width="0.1" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="1128.06" y="207.5" ></text>
+</g>
+<g >
+<title>TTASEventMutex&lt;GenericPolicy&gt;::wait:10(6),avg:248518 (167,305,603 samples, 0.08%)</title><rect x="1160.3" y="421" width="0.9" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="1163.30" y="431.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@plt:6(1),avg:89200074 (446,000,546 samples, 0.21%)</title><rect x="1149.8" y="437" width="2.5" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="1152.82" y="447.5" ></text>
+</g>
+<g >
+<title>que_run_threads:356(7),avg:5572315 (1,970,517,084 samples, 0.93%)</title><rect x="1179.0" y="485" width="11.0" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1182.05" y="495.5" ></text>
+</g>
+<g >
+<title>[unknown]:5965(2940),avg:0 (61,133,022 samples, 0.03%)</title><rect x="16.3" y="501" width="0.4" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="19.32" y="511.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:1924(7),avg:175811 (337,031,091 samples, 0.16%)</title><rect x="1117.8" y="165" width="1.9" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1120.79" y="175.5" ></text>
+</g>
+<g >
+<title>[unknown]:37,avg:588395 (21,770,609 samples, 0.01%)</title><rect x="1141.5" y="117" width="0.1" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="1144.51" y="127.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@@GLIBC_2.3.2:6(1),avg:89200046 (446,000,322 samples, 0.21%)</title><rect x="1149.8" y="421" width="2.5" height="15.0" fill="rgb(228,108,26)" rx="2" ry="2" />
+<text  x="1152.82" y="431.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:1597,avg:51786 (82,702,385 samples, 0.04%)</title><rect x="1123.4" y="245" width="0.5" height="15.0" fill="rgb(219,64,15)" rx="2" ry="2" />
+<text  x="1126.42" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:345,avg:182509 (62,965,760 samples, 0.03%)</title><rect x="1168.1" y="245" width="0.4" height="15.0" fill="rgb(242,172,41)" rx="2" ry="2" />
+<text  x="1171.12" y="255.5" ></text>
+</g>
+<g >
+<title>trx_purge:52(2),avg:9999358 (505,919,100 samples, 0.24%)</title><rect x="1167.7" y="485" width="2.8" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="1170.74" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:21(5),avg:40549381 (648,790,400 samples, 0.31%)</title><rect x="1164.1" y="437" width="3.6" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="1167.11" y="447.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:39,avg:665283 (25,946,030 samples, 0.01%)</title><rect x="1123.7" y="181" width="0.1" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="1126.66" y="191.5" ></text>
+</g>
+<g >
+<title>ut_delay:54425,avg:7167 (390,065,711 samples, 0.18%)</title><rect x="1139.1" y="213" width="2.1" height="15.0" fill="rgb(246,193,46)" rx="2" ry="2" />
+<text  x="1142.05" y="223.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:2460(12),avg:184882 (615,910,996 samples, 0.29%)</title><rect x="23.7" y="101" width="3.4" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="26.65" y="111.5" ></text>
+</g>
+<g >
+<title>[unknown]:2659(2),avg:36984 (98,266,258 samples, 0.05%)</title><rect x="22.3" y="309" width="0.5" height="15.0" fill="rgb(249,205,49)" rx="2" ry="2" />
+<text  x="25.27" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:167,avg:174246 (29,099,096 samples, 0.01%)</title><rect x="1189.0" y="261" width="0.1" height="15.0" fill="rgb(235,142,34)" rx="2" ry="2" />
+<text  x="1191.97" y="271.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:2288(1),avg:185485 (424,205,197 samples, 0.20%)</title><rect x="1179.5" y="309" width="2.4" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="1182.52" y="319.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:15(8),avg:1029640 (652,861,226 samples, 0.31%)</title><rect x="1164.1" y="501" width="3.6" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="1167.11" y="511.5" ></text>
+</g>
+<g >
+<title>ha_innobase::update_row:1056(15),avg:860640 (906,944,567 samples, 0.43%)</title><rect x="1137.7" y="373" width="5.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="1140.74" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown]:35,avg:744311 (26,050,870 samples, 0.01%)</title><rect x="1189.8" y="277" width="0.1" height="15.0" fill="rgb(211,27,6)" rx="2" ry="2" />
+<text  x="1192.77" y="287.5" ></text>
+</g>
+<g >
+<title>row_ins_sec_index_entry:1056,avg:80088 (84,572,466 samples, 0.04%)</title><rect x="1141.4" y="293" width="0.5" height="15.0" fill="rgb(215,50,12)" rx="2" ry="2" />
+<text  x="1144.41" y="303.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:108,avg:804925 (86,931,868 samples, 0.04%)</title><rect x="1188.3" y="309" width="0.4" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="1191.26" y="319.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:75,avg:616817 (46,261,281 samples, 0.02%)</title><rect x="1169.0" y="325" width="0.3" height="15.0" fill="rgb(206,8,1)" rx="2" ry="2" />
+<text  x="1172.02" y="335.5" ></text>
+</g>
+<g >
+<title>rw_lock_sx_lock_func:213,avg:226382 (48,219,313 samples, 0.02%)</title><rect x="1189.5" y="373" width="0.3" height="15.0" fill="rgb(213,41,9)" rx="2" ry="2" />
+<text  x="1192.50" y="383.5" ></text>
+</g>
+<g >
+<title>lock_rec_dequeue_from_page:2659,avg:68022 (180,871,477 samples, 0.09%)</title><rect x="1145.3" y="261" width="1.0" height="15.0" fill="rgb(218,62,15)" rx="2" ry="2" />
+<text  x="1148.34" y="271.5" ></text>
+</g>
+<g >
+<title>std::this_thread::sleep_for&lt;long, std::ratio&lt;1l, 1000000l&gt; &gt;:1986,avg:71272 (141,547,154 samples, 0.07%)</title><rect x="1169.6" y="469" width="0.8" height="15.0" fill="rgb(247,193,46)" rx="2" ry="2" />
+<text  x="1172.65" y="479.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:1206(2),avg:54226 (65,288,124 samples, 0.03%)</title><rect x="1112.2" y="69" width="0.4" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1115.21" y="79.5" ></text>
+</g>
+<g >
+<title>ut_delay:50806,avg:7158 (363,681,701 samples, 0.17%)</title><rect x="1143.3" y="245" width="2.0" height="15.0" fill="rgb(253,222,53)" rx="2" ry="2" />
+<text  x="1146.29" y="255.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:4821(10),avg:195034 (944,775,793 samples, 0.45%)</title><rect x="1117.7" y="245" width="5.3" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1120.71" y="255.5" ></text>
+</g>
+<g >
+<title>sched_setaffinity@plt:48(47) (502,138,169 samples, 0.24%)</title><rect x="16.7" y="453" width="2.8" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="19.66" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:50,avg:636486 (31,824,277 samples, 0.01%)</title><rect x="1125.1" y="149" width="0.1" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="1128.06" y="159.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:28,avg:845230 (23,666,450 samples, 0.01%)</title><rect x="1141.7" y="149" width="0.1" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="1144.68" y="159.5" ></text>
+</g>
+<g >
+<title>open_tables_for_query:2659,avg:8466 (22,510,575 samples, 0.01%)</title><rect x="23.4" y="389" width="0.1" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="26.40" y="399.5" ></text>
+</g>
+<g >
+<title>que_run_threads:51,avg:5396118 (275,202,032 samples, 0.13%)</title><rect x="1168.0" y="469" width="1.6" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="1171.04" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown]:3688(1),avg:135678 (500,243,830 samples, 0.24%)</title><rect x="1152.3" y="405" width="2.8" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="1155.31" y="415.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:28,avg:847153 (23,720,295 samples, 0.01%)</title><rect x="1141.7" y="197" width="0.1" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="1144.68" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown]:434,avg:52826 (22,926,582 samples, 0.01%)</title><rect x="1136.6" y="101" width="0.1" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="1139.59" y="111.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:52,avg:558495 (29,041,759 samples, 0.01%)</title><rect x="1123.4" y="149" width="0.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1126.43" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown]:1 (36,192,750 samples, 0.02%)</title><rect x="16.5" y="453" width="0.2" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="19.46" y="463.5" ></text>
+</g>
+<g >
+<title>btr_pcur_open_with_no_init_func:2659(12),avg:459492 (1,383,795,798 samples, 0.65%)</title><rect x="23.6" y="213" width="7.7" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="26.58" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:1922(7),avg:174346 (333,872,863 samples, 0.16%)</title><rect x="1117.8" y="149" width="1.8" height="15.0" fill="rgb(240,165,39)" rx="2" ry="2" />
+<text  x="1120.79" y="159.5" ></text>
+</g>
+<g >
+<title>ha_commit_low:2663(14),avg:255784 (680,820,786 samples, 0.32%)</title><rect x="1143.0" y="373" width="3.8" height="15.0" fill="rgb(237,149,35)" rx="2" ry="2" />
+<text  x="1145.98" y="383.5" ></text>
+</g>
+<g >
+<title>row_purge_reposition_pcur:333,avg:487299 (162,270,487 samples, 0.08%)</title><rect x="1168.1" y="389" width="0.9" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1171.10" y="399.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:716(3),avg:50434 (35,959,306 samples, 0.02%)</title><rect x="1143.1" y="181" width="0.2" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="1146.08" y="191.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:52,avg:558495 (29,041,759 samples, 0.01%)</title><rect x="1123.4" y="165" width="0.2" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="1126.43" y="175.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:37,avg:589891 (21,825,968 samples, 0.01%)</title><rect x="1141.5" y="181" width="0.1" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="1144.51" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:54,avg:624460 (33,720,854 samples, 0.02%)</title><rect x="1189.5" y="293" width="0.2" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="1192.50" y="303.5" ></text>
+</g>
+<g >
+<title>mtr_t::sx_lock:213,avg:226431 (48,229,813 samples, 0.02%)</title><rect x="1189.5" y="389" width="0.3" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1192.50" y="399.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:35,avg:745444 (26,090,547 samples, 0.01%)</title><rect x="1189.8" y="341" width="0.1" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1192.77" y="351.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:213,avg:172002 (36,636,371 samples, 0.02%)</title><rect x="1189.8" y="373" width="0.2" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="1192.77" y="383.5" ></text>
+</g>
+<g >
+<title>os_event::timed_wait:5(1),avg:100052740 (400,211,089 samples, 0.19%)</title><rect x="1157.9" y="453" width="2.2" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="1160.88" y="463.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:2525(1025),avg:129106301 (193,667,131,590 samples, 91.22%)</title><rect x="31.4" y="165" width="1076.4" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="34.42" y="175.5" >os_event::wait_low:2525(1025),avg:129106301</text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:268,avg:506261 (135,678,054 samples, 0.06%)</title><rect x="1123.9" y="133" width="0.8" height="15.0" fill="rgb(242,171,40)" rx="2" ry="2" />
+<text  x="1126.92" y="143.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:153,avg:519112 (79,424,143 samples, 0.04%)</title><rect x="1141.9" y="197" width="0.4" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="1144.89" y="207.5" ></text>
+</g>
+<g >
+<title>sched_setaffinity@@GLIBC_2.3.4:48(47) (502,134,564 samples, 0.24%)</title><rect x="16.7" y="437" width="2.8" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="19.66" y="447.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:1605(5),avg:179003 (287,283,909 samples, 0.14%)</title><rect x="1107.9" y="117" width="1.6" height="15.0" fill="rgb(229,111,26)" rx="2" ry="2" />
+<text  x="1110.93" y="127.5" ></text>
+</g>
+<g >
+<title>handler::ha_index_read_map:2659(1052),avg:120609450 (196,834,883,118 samples, 92.71%)</title><rect x="23.6" y="261" width="1094.0" height="15.0" fill="rgb(254,227,54)" rx="2" ry="2" />
+<text  x="26.55" y="271.5" >handler::ha_index_read_map:2659(1052),avg:120609450</text>
+</g>
+<g >
+<title>btr_cur_optimistic_insert:1597,avg:12814 (20,464,642 samples, 0.01%)</title><rect x="1123.3" y="245" width="0.1" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="1126.30" y="255.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:54,avg:625542 (33,779,252 samples, 0.02%)</title><rect x="1189.5" y="341" width="0.2" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="1192.50" y="351.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:35,avg:745444 (26,090,547 samples, 0.01%)</title><rect x="1189.8" y="325" width="0.1" height="15.0" fill="rgb(242,172,41)" rx="2" ry="2" />
+<text  x="1192.77" y="335.5" ></text>
+</g>
+<g >
+<title>handle_connection:1068(1068) (202,382,096,504 samples, 95.33%)</title><rect x="22.2" y="501" width="1124.8" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="25.17" y="511.5" >handle_connection:1068(1068)</text>
+</g>
+<g >
+<title>vio_io_wait:2661(4),avg:37510 (99,665,848 samples, 0.05%)</title><rect x="22.3" y="357" width="0.5" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="25.26" y="367.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:64,avg:715166 (45,770,600 samples, 0.02%)</title><rect x="1125.1" y="213" width="0.2" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="1128.06" y="223.5" ></text>
+</g>
+<g >
+<title>ha_commit_low:6(6) (19,441,948 samples, 0.01%)</title><rect x="1160.1" y="437" width="0.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1163.14" y="447.5" ></text>
+</g>
+<g >
+<title>LockSysGuard::acquire:704(1),avg:139781 (98,520,426 samples, 0.05%)</title><rect x="1115.5" y="149" width="0.5" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1118.47" y="159.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:2296,avg:272494 (625,645,122 samples, 0.29%)</title><rect x="1185.5" y="405" width="3.4" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="1188.45" y="415.5" ></text>
+</g>
+<g >
+<title>my_net_read:2661(4),avg:43199 (114,795,506 samples, 0.05%)</title><rect x="22.2" y="437" width="0.6" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="25.18" y="447.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:11,avg:132500006 (1,457,500,069 samples, 0.69%)</title><rect x="1125.6" y="181" width="8.1" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="1128.61" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:345,avg:182508 (62,965,154 samples, 0.03%)</title><rect x="1168.1" y="229" width="0.4" height="15.0" fill="rgb(242,171,40)" rx="2" ry="2" />
+<text  x="1171.12" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:1603(3),avg:177241 (283,585,503 samples, 0.13%)</title><rect x="1107.9" y="69" width="1.6" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1110.93" y="79.5" ></text>
+</g>
+<g >
+<title>os_event::timed_wait:479(2),avg:1075928 (513,217,898 samples, 0.24%)</title><rect x="10.0" y="453" width="2.9" height="15.0" fill="rgb(225,96,22)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" ></text>
+</g>
+<g >
+<title>os_event::wait_time_low:475(1),avg:1052724 (498,991,468 samples, 0.24%)</title><rect x="1147.0" y="469" width="2.8" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1150.05" y="479.5" ></text>
+</g>
+<g >
+<title>[unknown]:1617(3),avg:175243 (282,841,784 samples, 0.13%)</title><rect x="1107.9" y="37" width="1.6" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="1110.93" y="47.5" ></text>
+</g>
+<g >
+<title>nanosleep@plt:5(1),avg:100054874 (400,219,616 samples, 0.19%)</title><rect x="12.9" y="469" width="2.2" height="15.0" fill="rgb(247,196,47)" rx="2" ry="2" />
+<text  x="15.92" y="479.5" ></text>
+</g>
+<g >
+<title>MYSQL_RDS_AUDIT_LOG::flush_sleep_cond_wait:11(2),avg:50051079 (450,461,186 samples, 0.21%)</title><rect x="19.5" y="469" width="2.5" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="22.48" y="479.5" ></text>
+</g>
+<g >
+<title>btr_cur_search_to_nth_level:978(5),avg:522654 (510,512,612 samples, 0.24%)</title><rect x="1133.7" y="229" width="2.9" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1136.73" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown]:21(5),avg:40547707 (648,763,317 samples, 0.31%)</title><rect x="1164.1" y="405" width="3.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="1167.11" y="415.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:967,avg:521708 (504,491,514 samples, 0.24%)</title><rect x="1133.7" y="181" width="2.8" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="1136.74" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait@@GLIBC_2.3.2:479(2),avg:1075904 (513,206,201 samples, 0.24%)</title><rect x="10.0" y="421" width="2.9" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" ></text>
+</g>
+<g >
+<title>os_event::timed_wait:6(1),avg:89200143 (446,000,887 samples, 0.21%)</title><rect x="1149.8" y="453" width="2.5" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1152.82" y="463.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1054,avg:117501 (123,845,612 samples, 0.06%)</title><rect x="1141.9" y="229" width="0.7" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="1144.89" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:12(6),avg:52404158 (314,425,214 samples, 0.15%)</title><rect x="1162.3" y="421" width="1.8" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="1165.35" y="431.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:2924(5),avg:173333 (507,922,693 samples, 0.24%)</title><rect x="1133.7" y="213" width="2.9" height="15.0" fill="rgb(217,59,14)" rx="2" ry="2" />
+<text  x="1136.73" y="223.5" ></text>
+</g>
+<g >
+<title>std::__stable_sort_adaptive&lt;__gnu_cxx::__normal_iterator&lt;unsorted_lock_t*, std::vector&lt;unsorted_lock_t, ut_allocator&lt;unsorted_lock_t&gt; &gt; &gt;, unsorted_lock_t*, long, __gnu_cxx::__ops::_Iter_comp_iter&lt;CATS_Lock_priority&gt; &gt;:2540,avg:12916 (32,806,158 samples, 0.02%)</title><rect x="1146.1" y="213" width="0.2" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="1149.08" y="223.5" ></text>
+</g>
+<g >
+<title>btr_pcur_restore_position_func:213,avg:364498 (77,638,178 samples, 0.04%)</title><rect x="1189.0" y="389" width="0.4" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="1191.96" y="399.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_func:13776(1),avg:76646 (1,057,889,056 samples, 0.50%)</title><rect x="1179.4" y="341" width="5.9" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="1182.45" y="351.5" ></text>
+</g>
+<g >
+<title>[unknown]:1276,avg:170872 (218,032,981 samples, 0.10%)</title><rect x="1137.8" y="133" width="1.2" height="15.0" fill="rgb(206,8,2)" rx="2" ry="2" />
+<text  x="1140.82" y="143.5" ></text>
+</g>
+<g >
+<title>Sql_cmd_update::update_single_table:7(7) (20,237,389 samples, 0.01%)</title><rect x="15.1" y="501" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="18.14" y="511.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:108,avg:803188 (86,744,306 samples, 0.04%)</title><rect x="1188.3" y="293" width="0.4" height="15.0" fill="rgb(242,172,41)" rx="2" ry="2" />
+<text  x="1191.26" y="303.5" ></text>
+</g>
+<g >
+<title>std::__merge_sort_with_buffer&lt;__gnu_cxx::__normal_iterator&lt;unsorted_lock_t*, std::vector&lt;unsorted_lock_t, ut_allocator&lt;unsorted_lock_t&gt; &gt; &gt;, unsorted_lock_t*, __gnu_cxx::__ops::_Iter_comp_iter&lt;CATS_Lock_priority&gt; &gt;:5080,avg:5926 (30,104,913 samples, 0.01%)</title><rect x="1146.1" y="197" width="0.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1149.09" y="207.5" ></text>
+</g>
+<g >
+<title>rw_lock_x_lock_func:1607(10),avg:586083 (942,438,162 samples, 0.44%)</title><rect x="1117.7" y="213" width="5.3" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="1120.72" y="223.5" ></text>
+</g>
+<g >
+<title>innobase_commit_low:6(6) (19,439,398 samples, 0.01%)</title><rect x="1160.1" y="405" width="0.1" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="1163.14" y="415.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:12(9),avg:1058474 (314,434,272 samples, 0.15%)</title><rect x="1162.3" y="469" width="1.8" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="1165.35" y="479.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:1048,avg:177016 (185,512,956 samples, 0.09%)</title><rect x="1133.8" y="165" width="1.0" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="1136.78" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:36,avg:673152 (24,233,456 samples, 0.01%)</title><rect x="1142.6" y="149" width="0.1" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="1145.58" y="159.5" ></text>
+</g>
+<g >
+<title>__libc_nanosleep:51(1),avg:1052693 (52,634,673 samples, 0.02%)</title><rect x="1167.7" y="453" width="0.3" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="1170.75" y="463.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:1206(5),avg:54706 (67,471,776 samples, 0.03%)</title><rect x="1112.2" y="133" width="0.4" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1115.21" y="143.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:4791,avg:16516 (79,127,161 samples, 0.04%)</title><rect x="1123.4" y="229" width="0.5" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1126.42" y="239.5" ></text>
+</g>
+<g >
+<title>os_event_wait_time_low:475(1),avg:1052724 (498,991,468 samples, 0.24%)</title><rect x="1147.0" y="485" width="2.8" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="1150.05" y="495.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:408,avg:189075 (77,142,712 samples, 0.04%)</title><rect x="1189.0" y="357" width="0.4" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="1191.96" y="367.5" ></text>
+</g>
+<g >
+<title>row_purge_remove_sec_if_poss_leaf:333,avg:751380 (250,209,424 samples, 0.12%)</title><rect x="1168.1" y="421" width="1.3" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="1171.05" y="431.5" ></text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1054,avg:117513 (123,858,714 samples, 0.06%)</title><rect x="1141.9" y="245" width="0.7" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="1144.89" y="255.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:2(2) (191,885,876 samples, 0.09%)</title><rect x="15.3" y="485" width="1.0" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="18.26" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:35,avg:744658 (26,063,013 samples, 0.01%)</title><rect x="1189.8" y="293" width="0.1" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="1192.77" y="303.5" ></text>
+</g>
+<g >
+<title>buf_page_get_gen:4791,avg:53466 (256,156,212 samples, 0.12%)</title><rect x="1123.9" y="245" width="1.4" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="1126.89" y="255.5" ></text>
+</g>
+<g >
+<title>ha_innobase::update_row:1608(11),avg:859542 (1,381,937,932 samples, 0.65%)</title><rect x="1117.7" y="357" width="7.6" height="15.0" fill="rgb(235,142,34)" rx="2" ry="2" />
+<text  x="1120.66" y="367.5" ></text>
+</g>
+<g >
+<title>Sql_cmd_update::update_single_table:2659(1062),avg:121035190 (198,272,555,186 samples, 93.39%)</title><rect x="23.5" y="389" width="1102.0" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="26.52" y="399.5" >Sql_cmd_update::update_single_table:2659(1062),avg:121035190</text>
+</g>
+<g >
+<title>LockSysGuard::acquire:4141(8),avg:141786 (591,011,778 samples, 0.28%)</title><rect x="1112.2" y="165" width="3.2" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="1115.16" y="175.5" ></text>
+</g>
+<g >
+<title>sync_array_wait_event:153,avg:519413 (79,470,242 samples, 0.04%)</title><rect x="1141.9" y="213" width="0.4" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="1144.89" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:28,avg:845228 (23,666,373 samples, 0.01%)</title><rect x="1141.7" y="133" width="0.1" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="1144.68" y="143.5" ></text>
+</g>
+<g >
+<title>row_purge_step:334,avg:823712 (275,119,966 samples, 0.13%)</title><rect x="1168.0" y="453" width="1.6" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="1171.04" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:1048,avg:174736 (183,122,898 samples, 0.09%)</title><rect x="1133.8" y="101" width="1.0" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="1136.78" y="111.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@plt:2286(1),avg:183384 (419,031,913 samples, 0.20%)</title><rect x="1179.5" y="261" width="2.4" height="15.0" fill="rgb(240,165,39)" rx="2" ry="2" />
+<text  x="1182.52" y="271.5" ></text>
+</g>
+<g >
+<title>ha_commit_trans:6(6) (19,461,932 samples, 0.01%)</title><rect x="1160.1" y="469" width="0.1" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="1163.14" y="479.5" ></text>
+</g>
+<g >
+<title>Sql_cmd_dml::execute:3715(2118),avg:121057024 (201,435,129,057 samples, 94.88%)</title><rect x="23.3" y="421" width="1119.6" height="15.0" fill="rgb(253,220,52)" rx="2" ry="2" />
+<text  x="26.26" y="431.5" >Sql_cmd_dml::execute:3715(2118),avg:121057024</text>
+</g>
+<g >
+<title>pfs_rw_lock_x_lock_func:1597,avg:130221 (207,962,537 samples, 0.10%)</title><rect x="1123.9" y="229" width="1.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="1126.91" y="239.5" ></text>
+</g>
+<g >
+<title>rw_lock_s_lock_spin:249,avg:646655 (161,017,135 samples, 0.08%)</title><rect x="1168.1" y="309" width="0.9" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="1171.10" y="319.5" ></text>
+</g>
+<g >
+<title>os_event_wait_low:2288(1),avg:185186 (423,519,947 samples, 0.20%)</title><rect x="1179.5" y="293" width="2.4" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="1182.52" y="303.5" ></text>
+</g>
+<g >
+<title>row_ins_sec_index_entry_low:1597,avg:66140 (105,626,363 samples, 0.05%)</title><rect x="1123.3" y="261" width="0.6" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="1126.30" y="271.5" ></text>
+</g>
+<g >
+<title>command_substitute:4(4) (33,291,389 samples, 0.02%)</title><rect x="22.0" y="501" width="0.2" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="24.99" y="511.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2:75,avg:615110 (46,133,236 samples, 0.02%)</title><rect x="1169.0" y="261" width="0.3" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="1172.02" y="271.5" ></text>
+</g>
+<g >
+<title>os_event::wait_low:1048,avg:176671 (185,151,334 samples, 0.09%)</title><rect x="1133.8" y="133" width="1.0" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="1136.78" y="143.5" ></text>
+</g>
+<g >
+<title>os_event::timed_wait:475(1),avg:1051980 (498,638,419 samples, 0.23%)</title><rect x="1147.0" y="453" width="2.8" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="1150.05" y="463.5" ></text>
+</g>
+<g >
+<title>audit_log_flush_thread:1(1) (450,482,030 samples, 0.21%)</title><rect x="19.5" y="501" width="2.5" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="22.48" y="511.5" ></text>
+</g>
+<g >
+<title>vio_read:5320(4),avg:21070 (112,017,671 samples, 0.05%)</title><rect x="22.2" y="389" width="0.6" height="15.0" fill="rgb(213,41,9)" rx="2" ry="2" />
+<text  x="25.20" y="399.5" ></text>
+</g>
+</g>
+</svg>

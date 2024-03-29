@@ -1,4 +1,4 @@
-# pt_flame
+# pt_flame [介绍](./doc/zh.md) [introduction](./doc/en.md)
 
 pt\_flame 是基于 Intel PT 的程序性能分析工具，使用从 Intel PT 上采集到的程序执行踪迹生成挂钟时间火焰图。
 
